@@ -1952,6 +1952,24 @@ Contains:
 
 68. Development Phases
 
+Implementation status:
+
+* Phase 1 (Workspace Foundation) — done.
+* Phase 2 (Model Abstractions) — done.
+* Phase 3 (Gemma 4) — done. litert-lm-rust is vendored at `crates/litert-lm-rust`;
+  the Gemma adapter (`crates/noema-gemma`) streams tokens, keeps multi-turn
+  memory by replaying a Rust-side history as the native conversation preface,
+  reports usage, supports system prompts, text, and image/audio content parts,
+  and honours cancellation. The LiteRT-LM DLLs live in `prebuilt/` and are
+  staged next to every executable at build time (`crates/noema-native`); the
+  model file lives in `models/` (overridable with `NOEMA_GEMMA_MODEL`).
+* Phase 4 (Needle 2) — done. The Needle engine (`prebuilt/needle/`) is driven
+  through the official C API (`crates/noema-needle`): structured tool calls,
+  multi-turn conversations, refusal/escalation, and a CLI fallback.
+* Phase 5 (Initial Text Router) and later — not yet started.
+
+⸻
+
 Phase 1 — Workspace Foundation
 
 Implement:

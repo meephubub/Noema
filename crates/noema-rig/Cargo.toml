@@ -4,6 +4,17 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Integration between Noema and the Rig orchestration layer."
+description = "Integration between Noema and Rig: model adapters and provider wiring."
 
 [dependencies]
+async-trait = { workspace = true }
+base64 = "0.22"
+noema-core = { workspace = true }
+rig-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }

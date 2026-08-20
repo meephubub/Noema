@@ -7,3 +7,16 @@ license.workspace = true
 description = "Gemma 4 integration for Noema through litert-lm-rust."
 
 [dependencies]
+async-trait = { workspace = true }
+litert-lm-rust = { workspace = true }
+noema-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true, features = ["sync"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[build-dependencies]
+noema-native = { workspace = true }

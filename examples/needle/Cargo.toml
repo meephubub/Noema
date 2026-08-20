@@ -1,0 +1,16 @@
+[package]
+name = "needle-example"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Runs the Needle 2 tool-calling model through noema-needle."
+
+[[bin]]
+name = "needle-example"
+path = "src/main.rs"
+
+[dependencies]
+noema-needle = { workspace = true }
+serde_json = { workspace = true }

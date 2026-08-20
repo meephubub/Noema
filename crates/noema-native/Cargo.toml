@@ -1,0 +1,10 @@
+[package]
+name = "noema-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Build-time helper that stages the Noema native DLLs next to executables."
+
+[dependencies]

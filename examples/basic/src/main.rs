@@ -97,6 +97,11 @@ async fn main() -> Result<()> {
     println!("--- session events ---");
     while let Some(event) = events.next().await {
         println!("{event:?}");
+        // The bus stays open while the runtime and session hold it, so stop
+        // at the terminal event for this session's lifecycle.
+        if matches!(event, Event::SessionCompleted { .. }) {
+            break;
+        }
     }
 
     println!("done");

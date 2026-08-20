@@ -9,3 +9,7 @@ description = "Public frontend-facing Rust API for Noema."
 [dependencies]
 noema-core = { workspace = true }
 noema-events = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tokio-util = { workspace = true }

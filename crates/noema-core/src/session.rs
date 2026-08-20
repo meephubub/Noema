@@ -353,8 +353,12 @@ mod tests {
 
         let mut deltas = Vec::new();
         while let Some(event) = events.next().await {
-            if let Event::ModelDelta { delta, .. } = event {
-                deltas.push(delta);
+            match event {
+                Event::ModelDelta { delta, .. } => deltas.push(delta),
+                // The bus stays open while the session holds it, so the
+                // terminal event for a send is the end of this turn.
+                Event::ModelCompleted { .. } => break,
+                _ => {}
             }
         }
         assert_eq!(deltas, vec!["Hel", "lo ", "world"]);

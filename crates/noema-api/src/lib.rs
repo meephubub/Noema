@@ -15,11 +15,16 @@
 //! use noema_api::prelude::*;
 //!
 //! # async fn example() -> noema_api::Result<()> {
+//! # #[derive(Debug)]
 //! # struct Mock;
 //! # #[async_trait::async_trait]
 //! # impl Model for Mock {
 //! #     fn id(&self) -> &str { "mock" }
-//! #     async fn generate(&self, _r: ModelRequest, _c: CancellationToken) -> Result<ModelResponse> {
+//! #     async fn generate(
+//! #         &self,
+//! #         _r: ModelRequest,
+//! #         _c: tokio_util::sync::CancellationToken,
+//! #     ) -> Result<ModelResponse> {
 //! #         Ok(ModelResponse::Text { content: "hi".into(), usage: None })
 //! #     }
 //! # }

@@ -4,6 +4,15 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Needle 2 integration for Noema through its Rust binding."
+description = "Needle 2 (Cactus Compute) integration for Noema through the official engine C API."
 
 [dependencies]
+libloading = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

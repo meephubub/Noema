@@ -244,7 +244,31 @@ The result is an agent architecture that keeps expensive reasoning focused on th
 
 Status
 
-Noema is currently under active development.
+Noema is under active development. Phases 1–4 of the plan are implemented:
+
+* Phase 1 — workspace foundation, core crates, sessions, events.
+* Phase 2 — model abstractions: messages, multimodal content parts, streaming
+  responses, cancellation, provider abstraction.
+* Phase 3 — Gemma 4 through a vendored litert-lm-rust (`crates/litert-lm-rust`):
+  token streaming, multi-turn memory, usage metadata, system prompts, and
+  image/audio content mapping (`crates/noema-gemma`).
+* Phase 4 — Needle 2 through its official C API (`crates/noema-needle`):
+  structured tool calls, multi-turn conversation, refusal, and a CLI fallback.
+* Rig integration (`crates/noema-rig`) — any Noema model drives rig agents
+  through a `CompletionModel` adapter.
+
+Running locally:
+
+```sh
+# Gemma 4 (needs models/gemma-4-E2B-it.litertlm; DLLs are staged automatically)
+cargo run -p gemma-example
+
+# Needle 2 (engine lives in prebuilt/needle/)
+cargo run -p needle-example
+```
+
+Both engines are local: Gemma runs on CPU via LiteRT-LM, Needle is a
+self-contained 45M-parameter engine. No cloud calls are made.
 
 The project is being built entirely in Rust with a focus on:
 
@@ -267,6 +291,8 @@ noema/
 │   ├── noema-rig/
 │   ├── noema-gemma/
 │   ├── noema-needle/
+│   ├── noema-native/        # stages LiteRT-LM DLLs next to executables
+│   ├── litert-lm-rust/      # vendored Gemma 4 runtime binding
 │   ├── noema-memory/
 │   ├── noema-context/
 │   ├── noema-events/
@@ -274,6 +300,11 @@ noema/
 │   └── noema-tools/
 │
 ├── examples/
+│   ├── basic/
+│   ├── gemma/               # real local Gemma 4 conversation + rig path
+│   └── needle/              # real Needle 2 tool calls
+├── prebuilt/                # native engines (Needle 2, LiteRT-LM DLLs)
+├── models/                  # Gemma 4 model file (gitignored)
 ├── tests/
 ├── Cargo.toml
 ├── README.md

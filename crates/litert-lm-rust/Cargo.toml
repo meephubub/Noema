@@ -1,0 +1,49 @@
+[package]
+name = "litert-lm-rust"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.74"
+authors = ["LiteRT-LM Rust Contributors"]
+license = "Apache-2.0"
+description = "Safe, idiomatic Rust bindings for Google's LiteRT-LM on-device LLM runtime (Conversation API, multimodal, MTP)"
+repository = "https://github.com/google-ai-edge/LiteRT-LM"
+homepage = "https://ai.google.dev/edge/litert-lm"
+documentation = "https://docs.rs/litert-lm-rust"
+readme = "README.md"
+keywords = ["litert", "litert-lm", "llm", "on-device", "inference"]
+categories = ["api-bindings", "science", "multimedia"]
+links = "LiteRtLmC"
+include = [
+    "src/**/*",
+    "c/engine.h",
+    "c/wrapper.h",
+    "build.rs",
+    "README.md",
+    "LICENSE",
+    "examples/**/*",
+    "litert.md",
+]
+
+[package.metadata.docs.rs]
+features = ["docs-only"]
+targets = ["x86_64-unknown-linux-gnu"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = ["download-native"]
+# Skip linking the native LiteRT-LM library (for docs.rs / typecheck without a local build).
+docs-only = []
+# Regenerate FFI bindings with bindgen at build time (requires libclang).
+bindgen = ["dep:bindgen"]
+# Automatically download native libraries from GitHub releases if not found locally.
+download-native = ["dep:ureq"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+base64 = "0.22"
+
+[build-dependencies]
+bindgen = { version = "0.71", optional = true }
+ureq = { version = "2", optional = true }

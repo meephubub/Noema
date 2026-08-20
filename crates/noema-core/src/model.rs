@@ -273,6 +273,23 @@ pub trait Model: fmt::Debug + Send + Sync + 'static {
     ) -> Result<ModelResponse>;
 }
 
+/// Models can be shared by `Arc`; registering an `Arc<M>` behaves exactly
+/// like registering `M` itself.
+#[async_trait]
+impl<M: Model + ?Sized> Model for std::sync::Arc<M> {
+    fn id(&self) -> &str {
+        (**self).id()
+    }
+
+    async fn generate(
+        &self,
+        request: ModelRequest,
+        cancel: CancellationToken,
+    ) -> Result<ModelResponse> {
+        (**self).generate(request, cancel).await
+    }
+}
+
 /// A cloud escalation provider (Gemini, OpenAI, or a future provider).
 ///
 /// Providers are abstract: the core agent never hard-codes one.
