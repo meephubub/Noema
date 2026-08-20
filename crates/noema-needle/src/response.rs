@@ -39,7 +39,7 @@ pub struct ValidationInfo {
 }
 
 /// The complete envelope returned by `needle_complete`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct NeedleResponse {
     /// `"call"` when the model wants tool calls (an empty `function_calls`
     /// list is the refusal for unsupported input), `"respond"` when the

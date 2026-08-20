@@ -1966,7 +1966,21 @@ Implementation status:
 * Phase 4 (Needle 2) — done. The Needle engine (`prebuilt/needle/`) is driven
   through the official C API (`crates/noema-needle`): structured tool calls,
   multi-turn conversations, refusal/escalation, and a CLI fallback.
-* Phase 5 (Initial Text Router) and later — not yet started.
+* Phase 5 (Initial Text Router) — done. `crates/noema-router` routes every
+  plain-text user request through Needle 2 (`NeedleRouter`) before the
+  reasoning model runs: the default registry covers the six simple Agora
+  actions, the router acts only at or above a confidence threshold
+  (escalating low-confidence calls), and the runtime publishes
+  `RoutingStarted` / `RoutingCompleted` / `RoutingEscalated` events while
+  handled requests never invoke the model.
+* Phase 6 (Tool Infrastructure) and later — not yet started.
+
+Multimodal note: image input is verified end-to-end against the E2B
+checkpoint (vision executor on CPU; `gemma-model-understands-images` and the
+`gemma-example` confirm the model sees images). Audio input is accepted and
+flows through the same path, but the current checkpoint has no audio channel
+and declines gracefully; a future audio-capable checkpoint or LoRA should
+answer directly.
 
 ⸻
 

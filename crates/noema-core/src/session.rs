@@ -9,7 +9,8 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{NoemaError, Result};
-use crate::model::{Message, Model, ModelRequest, ModelResponse};
+use crate::model::{ContentPart, Message, Model, ModelRequest, ModelResponse, Role};
+use crate::router::{Route, Router, SendOutcome};
 
 /// The lifecycle state of a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +33,7 @@ pub struct Session {
     state: Arc<Mutex<SessionState>>,
     events: EventBus,
     model: Option<Arc<dyn Model>>,
+    router: Option<Arc<dyn Router>>,
     current_op: Arc<Mutex<Option<CancellationToken>>>,
 }
 
@@ -41,6 +43,7 @@ impl Session {
         events: EventBus,
         state: Arc<Mutex<SessionState>>,
         model: Option<Arc<dyn Model>>,
+        router: Option<Arc<dyn Router>>,
     ) -> Self {
         Self {
             id,
@@ -48,8 +51,14 @@ impl Session {
             state,
             events,
             model,
+            router,
             current_op: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// The router registered on this session, if any.
+    pub fn router(&self) -> Option<&Arc<dyn Router>> {
+        self.router.as_ref()
     }
 
     /// The session's unique id.
@@ -72,17 +81,25 @@ impl Session {
         self.events.subscribe(self.id.clone())
     }
 
-    /// Sends a message to the runtime's model and returns its response.
+    /// Sends a message and returns what happened.
     ///
-    /// The call is streamed through the event bus: [`Event::UserMessageReceived`],
-    /// [`Event::ModelStarted`], [`Event::ModelDelta`] (per chunk), and
-    /// [`Event::ModelCompleted`] are published as the model works. Streaming
-    /// responses are drained into a complete [`ModelResponse::Text`] before
-    /// returning.
+    /// Plain-text user requests are first offered to the session's router
+    /// (Needle 2 in practice). When the router handles the request, the
+    /// returned outcome is [`SendOutcome::Routed`] and the reasoning model is
+    /// never invoked; [`Event::RoutingStarted`] and [`Event::RoutingCompleted`]
+    /// are published. Otherwise the request escalates to the model
+    /// ([`Event::RoutingEscalated`]) and the outcome is
+    /// [`SendOutcome::Model`].
+    ///
+    /// Model turns are streamed through the event bus:
+    /// [`Event::UserMessageReceived`], [`Event::ModelStarted`],
+    /// [`Event::ModelDelta`] (per chunk), and [`Event::ModelCompleted`] are
+    /// published as the model works. Streaming responses are drained into a
+    /// complete [`ModelResponse::Text`] before returning.
     ///
     /// Requires a model to have been registered on the runtime via
     /// [`NoemaBuilder::with_model`](crate::NoemaBuilder::with_model).
-    pub async fn send(&self, message: Message) -> Result<ModelResponse> {
+    pub async fn send(&self, message: Message) -> Result<SendOutcome> {
         {
             let state = self.state.lock().await;
             if *state == SessionState::Closed {
@@ -107,6 +124,13 @@ impl Session {
         let token = CancellationToken::new();
         *self.current_op.lock().await = Some(token.clone());
 
+        // Initial text routing: plain-text user requests are offered to the
+        // router first; handled requests never reach the reasoning model.
+        if let Some(outcome) = self.route_message(&message, &token).await {
+            *self.current_op.lock().await = None;
+            return Ok(outcome);
+        }
+
         let request = ModelRequest::new(vec![message]);
         self.events.publish(Event::ModelStarted {
             session_id: self.id.clone(),
@@ -119,7 +143,57 @@ impl Session {
         *self.current_op.lock().await = None;
 
         let response = result?;
-        self.finish_response(response).await
+        let response = self.finish_response(response).await?;
+        Ok(SendOutcome::Model(response))
+    }
+
+    /// Routes a plain-text user message through the registered router.
+    ///
+    /// Returns `Some(SendOutcome::Routed(..))` when the router handled the
+    /// request, and `None` when it should escalate to the model (including
+    /// non-text or non-user messages, no router registered, and router
+    /// failures — which are surfaced as events but still escalate so the
+    /// user gets an answer).
+    async fn route_message(
+        &self,
+        message: &Message,
+        token: &CancellationToken,
+    ) -> Option<SendOutcome> {
+        let router = self.router.as_ref()?;
+        let text = match plain_user_text(message) {
+            Some(text) => text,
+            // Multimodal and non-user turns skip routing.
+            None => return None,
+        };
+
+        self.events.publish(Event::RoutingStarted {
+            session_id: self.id.clone(),
+        });
+        match router.route(&text, token.clone()).await {
+            Ok(Route::Action(action)) => {
+                self.events.publish(Event::RoutingCompleted {
+                    session_id: self.id.clone(),
+                });
+                Some(SendOutcome::Routed(action))
+            }
+            Ok(Route::Escalate { .. }) => {
+                self.events.publish(Event::RoutingEscalated {
+                    session_id: self.id.clone(),
+                });
+                None
+            }
+            Err(error) => {
+                tracing::warn!(router = %router.id(), error = %error, "router failed; escalating");
+                self.events.publish(Event::RoutingEscalated {
+                    session_id: self.id.clone(),
+                });
+                self.events.publish(Event::Error {
+                    session_id: self.id.clone(),
+                    error: error.to_string(),
+                });
+                None
+            }
+        }
     }
 
     /// Cancels the in-flight operation, if any.
@@ -198,10 +272,23 @@ impl Session {
     }
 }
 
+/// The message text when a message is a plain-text user turn, `None`
+/// otherwise (multimodal messages and non-user roles skip routing).
+fn plain_user_text(message: &Message) -> Option<String> {
+    if message.role != Role::User {
+        return None;
+    }
+    match message.content.as_slice() {
+        [ContentPart::Text(text)] => Some(text.clone()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{ContentPart, ModelChunk, ModelRequest, ModelResponse, Role};
+    use crate::router::RoutedAction;
 
     #[derive(Debug)]
     struct EchoModel;
@@ -239,6 +326,17 @@ mod tests {
             EventBus::default(),
             Arc::new(Mutex::new(SessionState::Active)),
             model,
+            None,
+        )
+    }
+
+    fn test_session_with_router(model: Option<Arc<dyn Model>>, router: Option<Arc<dyn Router>>) -> Session {
+        Session::new(
+            SessionId::generate(),
+            EventBus::default(),
+            Arc::new(Mutex::new(SessionState::Active)),
+            model,
+            router,
         )
     }
 
@@ -262,6 +360,7 @@ mod tests {
             id.clone(),
             bus.clone(),
             Arc::new(Mutex::new(SessionState::Active)),
+            None,
             None,
         );
         let mut events = bus.subscribe(id.clone());
@@ -288,7 +387,9 @@ mod tests {
         let response = session
             .send(Message::text(Role::User, "hello model"))
             .await
-            .expect("send");
+            .expect("send")
+            .into_model()
+            .expect("model outcome");
 
         match response {
             ModelResponse::Text { content, .. } => assert_eq!(content, "hello model"),
@@ -344,7 +445,9 @@ mod tests {
         let response = session
             .send(Message::text(Role::User, "stream"))
             .await
-            .expect("send");
+            .expect("send")
+            .into_model()
+            .expect("model outcome");
 
         match response {
             ModelResponse::Text { content, .. } => assert_eq!(content, "Hello world"),
@@ -391,7 +494,9 @@ mod tests {
         let response = session
             .send(Message::text(Role::User, "hard"))
             .await
-            .expect("send");
+            .expect("send")
+            .into_model()
+            .expect("model outcome");
         assert!(matches!(response, ModelResponse::Escalate(_)));
     }
 
@@ -442,5 +547,153 @@ mod tests {
         .expect("task ok");
 
         assert!(matches!(result, Err(NoemaError::Model(_))));
+    }
+
+    /// A router whose behaviour is chosen per test.
+    #[derive(Debug)]
+    struct FakeRouter {
+        handle: bool,
+        fail: bool,
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Router for FakeRouter {
+        fn id(&self) -> &str {
+            "fake-router"
+        }
+
+        async fn route(
+            &self,
+            text: &str,
+            _cancel: CancellationToken,
+        ) -> Result<Route> {
+            self.calls.lock().unwrap().push(text.to_string());
+            if self.fail {
+                return Err(NoemaError::Router("boom".into()));
+            }
+            if self.handle {
+                Ok(Route::Action(RoutedAction::new("open_flashcards")))
+            } else {
+                Ok(Route::Escalate {
+                    reason: "not an action".into(),
+                })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn router_handles_plain_text_without_the_model() {
+        let router = Arc::new(FakeRouter {
+            handle: true,
+            fail: false,
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let session = test_session_with_router(Some(Arc::new(EchoModel)), Some(router));
+        let mut events = session.events();
+
+        let outcome = session
+            .send(Message::text(Role::User, "open my flashcards"))
+            .await
+            .expect("send");
+        assert!(outcome.is_routed());
+        let action = outcome.into_routed().expect("routed outcome");
+        assert_eq!(action.id, "open_flashcards");
+
+        // Routing events, no model events at all.
+        assert!(matches!(
+            events.next().await,
+            Some(Event::UserMessageReceived { .. })
+        ));
+        assert!(matches!(events.next().await, Some(Event::RoutingStarted { .. })));
+        assert!(matches!(
+            events.next().await,
+            Some(Event::RoutingCompleted { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn router_escalation_reaches_the_model() {
+        let router = Arc::new(FakeRouter {
+            handle: false,
+            fail: false,
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let session = test_session_with_router(Some(Arc::new(EchoModel)), Some(router));
+        let mut events = session.events();
+
+        let outcome = session
+            .send(Message::text(Role::User, "what is the capital of france"))
+            .await
+            .expect("send");
+        let response = outcome.into_model().expect("model outcome");
+        match response {
+            ModelResponse::Text { content, .. } => {
+                assert_eq!(content, "what is the capital of france")
+            }
+            _ => panic!("expected text response"),
+        }
+
+        assert!(matches!(
+            events.next().await,
+            Some(Event::UserMessageReceived { .. })
+        ));
+        assert!(matches!(events.next().await, Some(Event::RoutingStarted { .. })));
+        assert!(matches!(
+            events.next().await,
+            Some(Event::RoutingEscalated { .. })
+        ));
+        assert!(matches!(
+            events.next().await,
+            Some(Event::ModelStarted { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn multimodal_messages_skip_routing() {
+        let router = Arc::new(FakeRouter {
+            handle: true,
+            fail: false,
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let session = test_session_with_router(Some(Arc::new(EchoModel)), Some(router));
+
+        let message = Message::new(
+            Role::User,
+            vec![
+                ContentPart::text("describe this"),
+                ContentPart::image(vec![1, 2, 3], "image/png"),
+            ],
+        );
+        let outcome = session.send(message).await.expect("send");
+        assert!(outcome.into_model().is_some(), "multimodal skips the router");
+    }
+
+    #[tokio::test]
+    async fn router_failure_escalates_with_error_event() {
+        let router = Arc::new(FakeRouter {
+            handle: false,
+            fail: true,
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let session = test_session_with_router(Some(Arc::new(EchoModel)), Some(router));
+        let mut events = session.events();
+
+        let outcome = session
+            .send(Message::text(Role::User, "open my flashcards"))
+            .await
+            .expect("send");
+        assert!(outcome.into_model().is_some(), "router failure escalates");
+
+        assert!(matches!(
+            events.next().await,
+            Some(Event::UserMessageReceived { .. })
+        ));
+        assert!(matches!(events.next().await, Some(Event::RoutingStarted { .. })));
+        assert!(matches!(
+            events.next().await,
+            Some(Event::RoutingEscalated { .. })
+        ));
+        assert!(matches!(events.next().await, Some(Event::Error { .. })));
     }
 }

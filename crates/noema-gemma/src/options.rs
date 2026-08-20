@@ -41,8 +41,12 @@ impl Default for GemmaOptions {
     fn default() -> Self {
         Self {
             backend: Backend::Cpu,
-            vision_backend: None,
-            audio_backend: None,
+            // The LiteRT engine only loads the vision/audio executors when
+            // these are set — without them an image turn fails with "Vision
+            // executor should not be null". CPU is the only backend this
+            // project uses, so default them on.
+            vision_backend: Some(Backend::Cpu),
+            audio_backend: Some(Backend::Cpu),
             num_threads: 4,
             max_num_tokens: None,
             max_output_tokens: 512,

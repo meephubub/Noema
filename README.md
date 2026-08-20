@@ -244,16 +244,21 @@ The result is an agent architecture that keeps expensive reasoning focused on th
 
 Status
 
-Noema is under active development. Phases 1–4 of the plan are implemented:
+Noema is under active development. Phases 1–5 of the plan are implemented:
 
 * Phase 1 — workspace foundation, core crates, sessions, events.
 * Phase 2 — model abstractions: messages, multimodal content parts, streaming
   responses, cancellation, provider abstraction.
 * Phase 3 — Gemma 4 through a vendored litert-lm-rust (`crates/litert-lm-rust`):
   token streaming, multi-turn memory, usage metadata, system prompts, and
-  image/audio content mapping (`crates/noema-gemma`).
+  image/audio input (`crates/noema-gemma`). Images are verified end-to-end;
+  audio flows through but the current checkpoint has no audio channel.
 * Phase 4 — Needle 2 through its official C API (`crates/noema-needle`):
   structured tool calls, multi-turn conversation, refusal, and a CLI fallback.
+* Phase 5 — the initial text router (`crates/noema-router`): every plain-text
+  request is offered to Needle 2 first; simple application actions are routed
+  (the model never runs), anything else escalates to the model, and the
+  runtime emits `RoutingStarted`/`RoutingCompleted`/`RoutingEscalated` events.
 * Rig integration (`crates/noema-rig`) — any Noema model drives rig agents
   through a `CompletionModel` adapter.
 
@@ -261,10 +266,13 @@ Running locally:
 
 ```sh
 # Gemma 4 (needs models/gemma-4-E2B-it.litertlm; DLLs are staged automatically)
-cargo run -p gemma-example
+cargo run -p gemma-example       # streaming, memory, usage, image + audio turns
 
 # Needle 2 (engine lives in prebuilt/needle/)
 cargo run -p needle-example
+
+# Initial text router: Needle routes simple actions, Gemma handles the rest
+cargo run -p router-example
 ```
 
 Both engines are local: Gemma runs on CPU via LiteRT-LM, Needle is a
@@ -291,6 +299,7 @@ noema/
 │   ├── noema-rig/
 │   ├── noema-gemma/
 │   ├── noema-needle/
+│   ├── noema-router/        # initial text router over Needle 2
 │   ├── noema-native/        # stages LiteRT-LM DLLs next to executables
 │   ├── litert-lm-rust/      # vendored Gemma 4 runtime binding
 │   ├── noema-memory/
@@ -302,7 +311,8 @@ noema/
 ├── examples/
 │   ├── basic/
 │   ├── gemma/               # real local Gemma 4 conversation + rig path
-│   └── needle/              # real Needle 2 tool calls
+│   ├── needle/              # real Needle 2 tool calls
+│   └── router/              # Needle routes actions, Gemma handles the rest
 ├── prebuilt/                # native engines (Needle 2, LiteRT-LM DLLs)
 ├── models/                  # Gemma 4 model file (gitignored)
 ├── tests/

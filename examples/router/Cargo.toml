@@ -1,0 +1,15 @@
+[package]
+name = "router-example"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+noema-core = { workspace = true }
+noema-events = { workspace = true }
+noema-gemma = { workspace = true }
+noema-router = { workspace = true }
+noema-needle = { workspace = true }
+tokio = { workspace = true }

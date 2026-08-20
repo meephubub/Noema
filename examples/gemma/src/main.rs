@@ -11,7 +11,9 @@
 //! `models/gemma-4-E2B-it.litertlm`. The LiteRT-LM DLLs are staged next to
 //! the executable automatically at build time.
 
-use noema_core::{init_logging, LogLevel, Message, Model, ModelResponse, Noema, Role};
+use noema_core::{
+    init_logging, ContentPart, LogLevel, Message, Model, ModelResponse, Noema, Role, SendOutcome,
+};
 use noema_gemma::GemmaModel;
 use noema_rig::NoemaCompletionModel;
 use rig_core::completion::{AssistantContent, CompletionModel, CompletionRequestBuilder};
@@ -38,11 +40,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "What is my favorite color?",
     ] {
         println!(">>> {prompt}");
-        let response = session
-            .send(Message::text(Role::User, prompt))
-            .await?;
-        match response {
-            ModelResponse::Text { content, .. } => {
+        let outcome = session.send(Message::text(Role::User, prompt)).await?;
+        match outcome {
+            SendOutcome::Routed(action) => println!("<<< routed to {}\n", action.id),
+            SendOutcome::Model(ModelResponse::Text { content, .. }) => {
                 println!("<<< {content}");
                 let usage = gemma.last_usage();
                 if let Some(usage) = usage {
@@ -54,9 +55,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!();
                 }
             }
-            ModelResponse::Escalate(request) => println!("<<< escalated: {}\n", request.reason),
-            ModelResponse::Stream(_) => println!("<<< (streamed)"),
+            SendOutcome::Model(ModelResponse::Escalate(request)) => {
+                println!("<<< escalated: {}\n", request.reason)
+            }
+            SendOutcome::Model(other) => println!("<<< (streamed) {other:?}\n"),
         }
+    }
+    session.close().await?;
+
+    println!("--- multimodal turns ---");
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/noema-gemma/tests/fixtures");
+    let image = std::fs::read(fixtures.join("red.png"))?;
+    let audio = std::fs::read(fixtures.join("tone.wav"))?;
+
+    let session = noema.create_session().await?;
+    println!(">>> [image] What color is this image? Answer in one word.");
+    let outcome = session
+        .send(Message::new(
+            Role::User,
+            vec![
+                ContentPart::text("What color is this image? Answer in one word."),
+                ContentPart::image(image, "image/png"),
+            ],
+        ))
+        .await?;
+    if let SendOutcome::Model(ModelResponse::Text { content, .. }) = outcome {
+        println!("<<< {content}\n");
+    }
+
+    println!(">>> [audio] What did you hear in this audio?");
+    let outcome = session
+        .send(Message::new(
+            Role::User,
+            vec![
+                ContentPart::text("What did you hear in this audio?"),
+                ContentPart::audio(audio, "audio/wav"),
+            ],
+        ))
+        .await?;
+    if let SendOutcome::Model(ModelResponse::Text { content, .. }) = outcome {
+        println!("<<< {content}\n");
     }
     session.close().await?;
 

@@ -33,7 +33,8 @@
 //! let session = noema.create_session().await?;
 //!
 //! let mut events = session.events();
-//! let response = session.send(Message::text(Role::User, "hello")).await?;
+//! let outcome = session.send(Message::text(Role::User, "hello")).await?;
+//! let response = outcome.into_model().expect("model response");
 //! // ... consume events, drive the session ...
 //!
 //! session.close().await?;
@@ -48,7 +49,8 @@ pub mod prelude {
     pub use noema_core::{
         init_logging, AudioData, ContentPart, EscalationRequest, ImageData, LogLevel, Message,
         Model, ModelChunk, ModelOptions, ModelProvider, ModelRequest, ModelResponse, Noema,
-        NoemaBuilder, NoemaConfig, NoemaError, Result, Role, Session, SessionState, Usage,
+        NoemaBuilder, NoemaConfig, NoemaError, Result, Role, Route, RoutedAction, Router,
+        SendOutcome, Session, SessionState, Usage,
     };
     pub use noema_events::{Event, EventBus, EventStream, SessionId};
 }
@@ -56,7 +58,8 @@ pub mod prelude {
 pub use noema_core::{
     init_logging, AudioData, ContentPart, EscalationRequest, ImageData, LogLevel, Message, Model,
     ModelChunk, ModelOptions, ModelProvider, ModelRequest, ModelResponse, Noema, NoemaBuilder,
-    NoemaConfig, NoemaError, Result, Role, Session, SessionState, Usage,
+    NoemaConfig, NoemaError, Result, Role, Route, RoutedAction, Router, SendOutcome, Session,
+    SessionState, Usage,
 };
 pub use noema_events::{Event, EventBus, EventStream, SessionId};
 

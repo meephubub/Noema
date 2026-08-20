@@ -77,18 +77,19 @@ async fn main() -> Result<()> {
 
     let mut events = session.events();
 
-    let response = session
+    let outcome = session
         .send(Message::text(Role::User, "hello from the basic example"))
         .await?;
 
-    match response {
-        ModelResponse::Text { content, usage } => {
+    match outcome {
+        SendOutcome::Model(ModelResponse::Text { content, usage }) => {
             println!("assistant: {content}");
             if let Some(usage) = usage {
                 println!("usage: {usage:?}");
             }
         }
-        other => println!("model responded: {other:?}"),
+        SendOutcome::Model(other) => println!("model responded: {other:?}"),
+        SendOutcome::Routed(action) => println!("routed to action: {}", action.id),
     }
 
     session.close().await?;

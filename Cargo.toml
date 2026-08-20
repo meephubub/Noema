@@ -6,6 +6,7 @@ members = [
     "crates/noema-rig",
     "crates/noema-gemma",
     "crates/noema-needle",
+    "crates/noema-router",
     "crates/noema-memory",
     "crates/noema-tools",
     "crates/noema-approval",
@@ -16,6 +17,7 @@ members = [
     "examples/basic",
     "examples/needle",
     "examples/gemma",
+    "examples/router",
     "tests/integration",
 ]
 
@@ -30,7 +32,7 @@ authors = ["Agora"]
 async-trait = "0.1"
 libloading = "0.8"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 tempfile = "3"
 thiserror = "1"
 tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread", "time"] }
@@ -48,6 +50,7 @@ noema-context = { path = "crates/noema-context" }
 noema-gemma = { path = "crates/noema-gemma" }
 noema-needle = { path = "crates/noema-needle" }
 noema-rig = { path = "crates/noema-rig" }
+noema-router = { path = "crates/noema-router" }
 noema-memory = { path = "crates/noema-memory" }
 noema-native = { path = "crates/noema-native" }
 litert-lm-rust = { path = "crates/litert-lm-rust", default-features = false }

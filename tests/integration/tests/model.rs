@@ -143,7 +143,9 @@ async fn session_sends_message_to_model() {
     let response = session
         .send(Message::text(Role::User, "hello from agora"))
         .await
-        .expect("send");
+        .expect("send")
+        .into_model()
+        .expect("model outcome");
 
     match response {
         ModelResponse::Text { content, .. } => assert_eq!(content, "hello from agora"),
@@ -168,7 +170,9 @@ async fn streaming_is_drained_and_emitted_as_deltas() {
     let response = session
         .send(Message::text(Role::User, "go"))
         .await
-        .expect("send");
+        .expect("send")
+        .into_model()
+        .expect("model outcome");
 
     match response {
         ModelResponse::Text { content, .. } => assert_eq!(content, "The quick fox"),
@@ -194,7 +198,9 @@ async fn usage_metadata_is_preserved() {
     let response = session
         .send(Message::text(Role::User, "go"))
         .await
-        .expect("send");
+        .expect("send")
+        .into_model()
+        .expect("model outcome");
 
     match response {
         ModelResponse::Text { usage, .. } => {
@@ -252,7 +258,12 @@ async fn multimodal_messages_reach_the_model() {
         ],
     );
 
-    let response = session.send(message).await.expect("send");
+    let response = session
+        .send(message)
+        .await
+        .expect("send")
+        .into_model()
+        .expect("model outcome");
     match response {
         ModelResponse::Text { content, .. } => {
             assert_eq!(content, "parts=3 image=true audio=true");
@@ -289,7 +300,9 @@ async fn escalation_request_is_surfaced() {
     let response = session
         .send(Message::text(Role::User, "very hard question"))
         .await
-        .expect("send");
+        .expect("send")
+        .into_model()
+        .expect("model outcome");
 
     match response {
         ModelResponse::Escalate(request) => {
@@ -298,4 +311,101 @@ async fn escalation_request_is_surfaced() {
         }
         _ => panic!("expected escalation"),
     }
+}
+
+/// A router that handles "open my flashcards" and escalates everything else.
+#[derive(Debug)]
+struct FakeRouter;
+
+#[async_trait::async_trait]
+impl Router for FakeRouter {
+    fn id(&self) -> &str {
+        "fake-router"
+    }
+
+    async fn route(
+        &self,
+        text: &str,
+        _cancel: CancellationToken,
+    ) -> Result<Route> {
+        if text == "open my flashcards" {
+            Ok(Route::Action(RoutedAction::new("open_flashcards")))
+        } else {
+            Ok(Route::Escalate {
+                reason: "not an app action".into(),
+            })
+        }
+    }
+}
+
+#[tokio::test]
+async fn router_handles_simple_actions_without_the_model() {
+    let noema = Noema::builder()
+        .with_model(EchoModel)
+        .with_router(FakeRouter)
+        .build()
+        .await
+        .expect("build runtime");
+    let session = noema.create_session().await.expect("create session");
+    let mut events = session.events();
+
+    let outcome = session
+        .send(Message::text(Role::User, "open my flashcards"))
+        .await
+        .expect("send");
+    let action = outcome.into_routed().expect("routed outcome");
+    assert_eq!(action.id, "open_flashcards");
+
+    let mut saw_started = false;
+    let mut saw_completed = false;
+    while let Some(event) = events.next().await {
+        match event {
+            Event::RoutingStarted { .. } => saw_started = true,
+            Event::RoutingCompleted { .. } => {
+                saw_completed = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_started && saw_completed);
+}
+
+#[tokio::test]
+async fn router_escalation_flows_into_the_model() {
+    let noema = Noema::builder()
+        .with_model(EchoModel)
+        .with_router(FakeRouter)
+        .build()
+        .await
+        .expect("build runtime");
+    let session = noema.create_session().await.expect("create session");
+    let mut events = session.events();
+
+    let outcome = session
+        .send(Message::text(Role::User, "what is the capital of france"))
+        .await
+        .expect("send")
+        .into_model()
+        .expect("model outcome");
+    match outcome {
+        ModelResponse::Text { content, .. } => {
+            assert_eq!(content, "what is the capital of france")
+        }
+        _ => panic!("expected echo"),
+    }
+
+    let mut saw_escalated = false;
+    let mut saw_model = false;
+    while let Some(event) = events.next().await {
+        match event {
+            Event::RoutingEscalated { .. } => saw_escalated = true,
+            Event::ModelStarted { .. } => {
+                saw_model = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_escalated && saw_model);
 }

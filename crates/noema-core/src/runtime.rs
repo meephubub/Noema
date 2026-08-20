@@ -9,6 +9,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::config::{LogLevel, NoemaConfig};
 use crate::error::{NoemaError, Result};
 use crate::model::Model;
+use crate::router::Router;
 use crate::session::{Session, SessionState};
 
 /// A Noema runtime.
@@ -32,6 +33,7 @@ pub struct Noema {
     events: EventBus,
     sessions: Mutex<HashMap<SessionId, Arc<AsyncMutex<SessionState>>>>,
     model: Option<Arc<dyn Model>>,
+    router: Option<Arc<dyn Router>>,
 }
 
 impl Noema {
@@ -48,6 +50,11 @@ impl Noema {
     /// The model registered on this runtime, if any.
     pub fn model(&self) -> Option<&Arc<dyn Model>> {
         self.model.as_ref()
+    }
+
+    /// The router registered on this runtime, if any.
+    pub fn router(&self) -> Option<&Arc<dyn Router>> {
+        self.router.as_ref()
     }
 
     /// Creates a new ephemeral session and emits [`Event::SessionStarted`].
@@ -68,6 +75,7 @@ impl Noema {
             self.events.clone(),
             state,
             self.model.clone(),
+            self.router.clone(),
         ))
     }
 
@@ -117,6 +125,7 @@ impl Noema {
 pub struct NoemaBuilder {
     config: NoemaConfig,
     model: Option<Arc<dyn Model>>,
+    router: Option<Arc<dyn Router>>,
 }
 
 impl NoemaBuilder {
@@ -141,6 +150,16 @@ impl NoemaBuilder {
         self
     }
 
+    /// Registers the initial text router.
+    ///
+    /// When set, plain-text user requests are routed through it first;
+    /// handled requests never reach the model (see
+    /// [`Router`](crate::router::Router)).
+    pub fn with_router<R: Router>(mut self, router: R) -> Self {
+        self.router = Some(Arc::new(router));
+        self
+    }
+
     /// Builds the runtime.
     ///
     /// Async to match the final public API shape; later milestones load
@@ -154,6 +173,7 @@ impl NoemaBuilder {
             config: self.config,
             sessions: Mutex::new(HashMap::new()),
             model: self.model,
+            router: self.router,
         })
     }
 }
@@ -247,7 +267,9 @@ mod tests {
         let response = session
             .send(Message::text(Role::User, "ping"))
             .await
-            .expect("send");
+            .expect("send")
+            .into_model()
+            .expect("model outcome");
 
         match response {
             ModelResponse::Text { content, .. } => assert_eq!(content, "pong"),

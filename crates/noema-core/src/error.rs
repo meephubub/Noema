@@ -17,6 +17,9 @@ pub enum NoemaError {
     /// A failure in the Needle integration or its output.
     #[error("needle error: {0}")]
     Needle(String),
+    /// A failure in the initial text router.
+    #[error("router error: {0}")]
+    Router(String),
     /// A failure during tool execution.
     #[error("tool error: {0}")]
     Tool(String),
@@ -48,6 +51,7 @@ mod tests {
     fn errors_display_their_category() {
         assert!(NoemaError::Model("boom".into()).to_string().contains("model"));
         assert!(NoemaError::Needle("boom".into()).to_string().contains("needle"));
+        assert!(NoemaError::Router("boom".into()).to_string().contains("router"));
         assert!(NoemaError::Tool("boom".into()).to_string().contains("tool"));
         assert!(NoemaError::Memory("boom".into()).to_string().contains("memory"));
         assert!(NoemaError::Approval("boom".into()).to_string().contains("approval"));

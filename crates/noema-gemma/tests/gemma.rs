@@ -12,7 +12,7 @@
 use litert_lm_rust::{
     ConversationConfig, Engine, Message, SamplerParams, SessionConfig, StreamEvent,
 };
-use noema_core::{Model, ModelRequest, ModelResponse, Role};
+use noema_core::{ContentPart, Model, ModelRequest, ModelResponse, Role};
 use noema_gemma::{default_model_path, GemmaModel};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -35,7 +35,12 @@ fn config(system: Option<&str>) -> ConversationConfig {
 
 fn engine() -> Engine {
     let path = default_model_path().expect("set NOEMA_GEMMA_MODEL or put the model in models/");
-    Engine::builder(path).num_threads(4).build().expect("engine loads")
+    Engine::builder(path)
+        .num_threads(4)
+        .vision_backend(litert_lm_rust::Backend::Cpu)
+        .audio_backend(litert_lm_rust::Backend::Cpu)
+        .build()
+        .expect("engine loads")
 }
 
 /// Extracts the plain-text delta from a streamed chunk. LiteRT-LM streams
@@ -88,6 +93,60 @@ async fn drain_model_stream(
         }
     }
     (text, None)
+}
+
+/// Fixture bytes for multimodal turns: an 8x8 solid-red PNG and a 440 Hz
+/// tone WAV, generated at `tests/fixtures/`.
+fn fixtures() -> (Vec<u8>, Vec<u8>) {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    (
+        std::fs::read(dir.join("red.png")).expect("red.png fixture"),
+        std::fs::read(dir.join("tone.wav")).expect("tone.wav fixture"),
+    )
+}
+
+#[test]
+#[ignore = "needs the Gemma model file"]
+fn engine_accepts_image_and_audio_turns() {
+    let engine = engine();
+    let mut conversation = engine
+        .create_conversation(config(Some("Be very brief.")))
+        .expect("conversation");
+    let (image, audio) = fixtures();
+
+    let image_message = Message::user_parts([
+        litert_lm_rust::ContentPart::text("What color is this image?"),
+        litert_lm_rust::ContentPart::image_bytes(&image),
+    ])
+    .expect("image message");
+    match conversation.send_message(image_message) {
+        Ok(reply) => {
+            let text = reply.text().unwrap_or_default();
+            eprintln!("image turn reply: {text:?}");
+            assert!(!text.trim().is_empty());
+        }
+        Err(error) => {
+            eprintln!("image turn FAILED: {error}");
+            panic!("model does not accept image input: {error}");
+        }
+    }
+
+    let audio_message = Message::user_parts([
+        litert_lm_rust::ContentPart::text("What did you hear in this audio?"),
+        litert_lm_rust::ContentPart::audio_bytes(&audio),
+    ])
+    .expect("audio message");
+    match conversation.send_message(audio_message) {
+        Ok(reply) => {
+            let text = reply.text().unwrap_or_default();
+            eprintln!("audio turn reply: {text:?}");
+            assert!(!text.trim().is_empty());
+        }
+        Err(error) => {
+            eprintln!("audio turn FAILED: {error}");
+            panic!("model does not accept audio input: {error}");
+        }
+    }
 }
 
 #[test]
@@ -202,6 +261,74 @@ async fn gemma_model_keeps_multi_turn_memory() {
         reply.to_lowercase().contains("zorp"),
         "model should remember the name across streamed turns, got: {reply:?}"
     );
+}
+
+#[tokio::test]
+#[ignore = "needs the Gemma model file"]
+async fn gemma_model_understands_images() {
+    let model = GemmaModel::from_default().expect("model loads");
+    let (image, _) = fixtures();
+
+    let response = model
+        .generate(
+            ModelRequest::new(vec![noema_core::Message::new(
+                Role::User,
+                vec![
+                    ContentPart::text("What color is this image? Answer in one word."),
+                    ContentPart::image(image, "image/png"),
+                ],
+            )]),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("generate");
+
+    match response {
+        ModelResponse::Stream(stream) => {
+            let (text, error) = drain_model_stream(stream).await;
+            assert!(error.is_none(), "stream errored: {error:?}");
+            assert!(
+                text.to_lowercase().contains("red"),
+                "expected the model to see a red image, got: {text:?}"
+            );
+            eprintln!("image reply: {text:?}");
+        }
+        other => panic!("expected a stream, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs the Gemma model file"]
+async fn gemma_model_accepts_audio_turns() {
+    let model = GemmaModel::from_default().expect("model loads");
+    let (_, audio) = fixtures();
+
+    let response = model
+        .generate(
+            ModelRequest::new(vec![noema_core::Message::new(
+                Role::User,
+                vec![
+                    ContentPart::text("What did you hear in this audio?"),
+                    ContentPart::audio(audio, "audio/wav"),
+                ],
+            )]),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("generate");
+
+    match response {
+        ModelResponse::Stream(stream) => {
+            // The audio path must not error — the current E2B checkpoint has
+            // no audio channel, so the model declines gracefully; a future
+            // audio-capable checkpoint should answer here.
+            let (text, error) = drain_model_stream(stream).await;
+            assert!(error.is_none(), "stream errored: {error:?}");
+            assert!(!text.trim().is_empty(), "expected a reply, got empty");
+            eprintln!("audio reply: {text:?}");
+        }
+        other => panic!("expected a stream, got {other:?}"),
+    }
 }
 
 #[tokio::test]

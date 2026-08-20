@@ -25,6 +25,7 @@ pub mod config;
 pub mod error;
 pub mod logging;
 pub mod model;
+pub mod router;
 pub mod runtime;
 pub mod session;
 
@@ -35,5 +36,6 @@ pub use model::{
     AudioData, ContentPart, EscalationRequest, ImageData, Message, Model, ModelChunk,
     ModelOptions, ModelProvider, ModelRequest, ModelResponse, Role, Usage,
 };
+pub use router::{Route, RoutedAction, Router, SendOutcome};
 pub use runtime::{Noema, NoemaBuilder};
 pub use session::{Session, SessionState};
