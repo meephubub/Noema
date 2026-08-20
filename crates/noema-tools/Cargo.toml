@@ -1,0 +1,13 @@
+[package]
+name = "noema-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Common tool infrastructure for Noema: risk levels, traits, registry, and schemas."
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = "1"

@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/noema-core",
+    "crates/noema-api",
+    "crates/noema-rig",
+    "crates/noema-gemma",
+    "crates/noema-needle",
+    "crates/noema-memory",
+    "crates/noema-tools",
+    "crates/noema-approval",
+    "crates/noema-context",
+    "crates/noema-events",
+    "examples/basic",
+    "tests/integration",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+authors = ["Agora"]
+
+[workspace.dependencies]
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread", "time"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+noema-core = { path = "crates/noema-core" }
+noema-api = { path = "crates/noema-api" }
+noema-events = { path = "crates/noema-events" }
+noema-tools = { path = "crates/noema-tools" }
+noema-approval = { path = "crates/noema-approval" }
+noema-context = { path = "crates/noema-context" }
+noema-gemma = { path = "crates/noema-gemma" }
+noema-needle = { path = "crates/noema-needle" }
+noema-rig = { path = "crates/noema-rig" }
+noema-memory = { path = "crates/noema-memory" }

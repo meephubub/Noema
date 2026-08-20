@@ -1,0 +1,11 @@
+[package]
+name = "noema-events"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Event definitions and streaming infrastructure for Noema."
+
+[dependencies]
+serde = { workspace = true }
+tokio = { workspace = true }

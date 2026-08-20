@@ -1,0 +1,9 @@
+[package]
+name = "noema-gemma"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gemma 4 integration for Noema through litert-lm-rust."
+
+[dependencies]

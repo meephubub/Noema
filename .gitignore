@@ -1,0 +1,11 @@
+# Freebuff workspace metadata
+.freebuff/
+
+# Rust build artifacts
+/target/
+
+# OS noise
+.DS_Store
+
+# Editor noise
+*.swp

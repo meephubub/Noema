@@ -1,0 +1,9 @@
+[package]
+name = "noema-rig"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Integration between Noema and the Rig orchestration layer."
+
+[dependencies]

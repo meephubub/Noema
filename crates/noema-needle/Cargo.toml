@@ -1,0 +1,9 @@
+[package]
+name = "noema-needle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Needle 2 integration for Noema through its Rust binding."
+
+[dependencies]

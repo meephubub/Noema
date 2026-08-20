@@ -1,0 +1,9 @@
+[package]
+name = "noema-memory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Mnemo integration for Noema: memory retrieval, insertion, and policy."
+
+[dependencies]

@@ -1,0 +1,19 @@
+[package]
+name = "noema-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The central Noema runtime: agent runtime, sessions, configuration, errors, and logging."
+
+[dependencies]
+async-trait = { workspace = true }
+noema-events = { workspace = true }
+noema-tools = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
