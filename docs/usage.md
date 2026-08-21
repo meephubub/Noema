@@ -452,6 +452,50 @@ arrives, its extraction policy belongs to that crate.
 
 ---
 
+## 5.13 The Needle→Gemma bridge
+
+`noema-bridge` provides a two-tier inference session: Needle 2 with 5 stub
+tools runs first for fast, deterministic tool dispatch; when confidence is
+below a configurable threshold (default 0.6) or when Needle refuses, the
+same prompt is forwarded to Gemma 4 for full reasoning.
+
+```rust
+use std::sync::Arc;
+use noema_api::prelude::*;
+
+let noema = Noema::builder()
+    .with_model(gemma_model)
+    .build()
+    .await?;
+let session = noema.create_session().await?;
+
+// Or use the bridge directly:
+let bridge = noema_bridge::BridgeSession::from_default(
+    noema_bridge::BridgeConfig {
+        min_confidence: 0.6,
+        needle_max_tokens: 256,
+        ..Default::default()
+    },
+)?
+.with_gemma(Arc::new(gemma_model));
+
+let outcome = bridge
+    .send(
+        Message::text(Role::User, "search for rust docs"),
+        CancellationToken::new(),
+    )
+    .await?;
+```
+
+The 5 stub tools are: `search`, `calculate`, `translate`, `summarize`,
+and `navigate`. They return basic canned results and can be replaced with
+real implementations via `BridgeSession::with_tools()`.
+
+`BridgeSession`, `BridgeConfig`, and `stub_registry` are re-exported
+through `noema_api::prelude`.
+
+---
+
 ## 6. Building, publishing, and using the crates
 
 See [`docs/publishing.md`](publishing.md) for the complete guide: how to

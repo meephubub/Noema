@@ -953,6 +953,7 @@ name = "noema-api"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "noema-bridge",
  "noema-core",
  "noema-events",
  "noema-provider-http",
@@ -969,6 +970,22 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+]
+
+[[package]]
+name = "noema-bridge"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "noema-core",
+ "noema-needle",
+ "noema-tools",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

@@ -2096,6 +2096,16 @@ Implementation status:
   policy review: nothing is persisted until Mnemo lands, so there is no
   memory to leak or review yet (deferred with Phase 9).
 * Phase 9 (Mnemo) — deferred (Mnemo is not yet complete).
+* Phase 15 (Needle→Gemma Bridge) — done. `crates/noema-bridge` provides a
+  two-tier inference session: Needle 2 with 5 stub tools runs first for
+  fast, deterministic tool dispatch; when confidence is below a configurable
+  threshold (default 0.6), or when Needle refuses, the same prompt is
+  forwarded to Gemma 4 for full reasoning. `BridgeSession` exposes a
+  `send(Message, CancellationToken)` API returning `SendOutcome`, with an
+  optional `.with_gemma()` for the escalation target. `stub_registry()`
+  provides the 5 placeholder tools (search, calculate, translate, summarize,
+  navigate) that return basic canned results. The bridge is re-exported
+  through `noema-api` (`BridgeSession`, `BridgeConfig`, `stub_registry`).
 
 ⸻
 

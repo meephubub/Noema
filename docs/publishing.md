@@ -44,6 +44,7 @@ cargo test --workspace -- --ignored   # real-inference tests (needs the engines 
 | `noema-provider-http` | OpenAI-compatible cloud provider | ✅ pure Rust |
 | `noema-filesearch` | Reference tool crate | ✅ pure Rust |
 | `noema-rig` | Rig adapters | ✅ pure Rust (depends on `rig-core` from crates.io) |
+| `noema-bridge` | Needle→Gemma confidence bridge | ✅ pure Rust (depends on `noema-needle`) |
 | `noema-gemma` | Gemma 4 adapter | ⚠️ needs `litert-lm-rust` + model artifacts at runtime |
 | `noema-needle` | Needle 2 FFI binding | ⚠️ needs the prebuilt engine at runtime |
 | `noema-needle-static` | Needle 2 static link | ⚠️ needs `libneedle.a` at build time |
@@ -76,6 +77,7 @@ on crates.io.
    ```
 
    `noema-rig` can follow (it also depends on the crates.io `rig-core`).
+   `noema-bridge` (depends on `noema-needle`) and
    `noema-gemma` / `noema-needle` / `noema-needle-static` /
    `noema-router` / `litert-lm-rust` are publishable but
    carry native-runtime caveats (see below) — publish them after

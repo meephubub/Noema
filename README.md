@@ -315,6 +315,9 @@ Noema is under active development. Phases 1–8 and 10 of the plan are implement
   prompt-injection defences (delimited tool results framed as data, explicit
   trust boundaries), content-free telemetry, and opt-in cloud with
   `offline_mode` always winning.
+* Phase 15 — Needle→Gemma bridge (`crates/noema-bridge`): fast Needle 2
+  tool dispatch with 5 stub tools, confidence-based escalation to Gemma 4
+  for low-confidence or unhandled requests, exposed via `noema-api`.
 * Rig integration (`crates/noema-rig`) — any Noema model drives rig agents
   through a `CompletionModel` adapter (full chat history forwarded by
   default).
@@ -398,6 +401,7 @@ noema/
 │   ├── noema-needle-static/  # Needle 2 statically linked (StaticEngine)
 │   ├── noema-router/        # initial text router + tool-specific Needle agents
 │   ├── noema-filesearch/    # the reference tool (read-only file search)
+│   ├── noema-bridge/        # Needle 2 → Gemma 4 confidence bridge (5 stub tools)
 │   ├── noema-approval/      # risk-gated human approval
 │   ├── noema-provider-http/ # OpenAI-compatible cloud provider (model, URL, key)
 │   ├── noema-native/        # stages LiteRT-LM DLLs next to executables
@@ -405,7 +409,6 @@ noema/
 │   ├── noema-memory/
 │   ├── noema-context/
 │   ├── noema-events/
-│   ├── noema-approval/
 │   └── noema-tools/
 │
 ├── examples/

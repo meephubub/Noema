@@ -1,0 +1,22 @@
+[package]
+name = "noema-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Needle 2 → Gemma 4 confidence bridge: fast tool dispatch with graceful escalation."
+
+[dependencies]
+async-trait = { workspace = true }
+noema-core = { workspace = true }
+noema-needle = { workspace = true }
+noema-tools = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

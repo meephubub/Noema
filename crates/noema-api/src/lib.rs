@@ -94,6 +94,7 @@
 
 /// Convenience re-exports of the public API.
 pub mod prelude {
+    pub use noema_bridge::{BridgeConfig, BridgeSession, stub_registry};
     pub use noema_core::{
         init_logging, ApprovalDecision, ApprovalId, ApprovalPolicy, ApprovalRequest,
         ApprovalStatus, AudioData, ContentPart, EscalationMetrics, EscalationRequest, ImageData,
@@ -110,6 +111,7 @@ pub mod prelude {
     };
 }
 
+pub use noema_bridge::{BridgeConfig, BridgeSession};
 pub use noema_core::{
     init_logging, ApprovalDecision, ApprovalId, ApprovalPolicy, ApprovalRequest, ApprovalStatus,
     AudioData, ContentPart, EscalationMetrics, EscalationRequest, ImageData, LogLevel, Message,

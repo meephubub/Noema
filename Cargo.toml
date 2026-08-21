@@ -17,6 +17,7 @@ members = [
     "crates/noema-native",
     "crates/noema-provider-http",
     "crates/litert-lm-rust",
+    "crates/noema-bridge",
     "examples/basic",
     "examples/needle",
     "examples/gemma",
@@ -67,6 +68,7 @@ noema-rig = { path = "crates/noema-rig", version = "0.1.0" }
 noema-router = { path = "crates/noema-router", version = "0.1.0" }
 noema-memory = { path = "crates/noema-memory", version = "0.1.0" }
 noema-native = { path = "crates/noema-native", version = "0.1.0" }
+noema-bridge = { path = "crates/noema-bridge", version = "0.1.0" }
 noema-provider-http = { path = "crates/noema-provider-http", version = "0.1.0" }
 litert-lm-rust = { path = "crates/litert-lm-rust", version = "0.2", default-features = false }
 rig-core = { version = "0.42", default-features = false }
