@@ -192,10 +192,21 @@ Task too difficult
 Cloud Provider
     ↓
 Larger Model
+    ↓
+Local agent continues
 
-The cloud layer is provider-agnostic and can support different providers through a common abstraction.
+The cloud layer is provider-agnostic: the runtime registers abstract
+`ModelProvider`s (`Noema::builder().with_provider(..)`) and the escalation
+policy decides where a request goes (`Local` / `Cloud` / `Denied`). The
+bundled `OpenAICompatibleProvider` (`crates/noema-provider-http`) reaches
+Gemini, OpenAI, Ollama, vLLM, and any OpenAI-compatible endpoint from just
+three fields — model name, base URL, and API key — which also live in
+`NoemaConfig::cloud`. Escalations are bounded by a per-request budget and
+the policy's latency limit, and the cloud answer is fed back so the local
+agent continues.
 
-Cloud escalation can be disabled for fully local/offline operation.
+Cloud escalation can be disabled for fully local/offline operation
+(`NoemaConfig::offline_mode` / `EscalationPolicy::offline_only`).
 
 Rust API
 
@@ -280,6 +291,24 @@ Noema is under active development. Phases 1–8 and 10 of the plan are implement
   summaries injected as the system prompt. Sessions own the conversation,
   so multi-turn memory works for any model. `examples/agent` runs it against
   the real engines.
+* Phase 11 — cloud escalation as a general abstraction: the runtime
+  registers abstract `ModelProvider`s and `EscalationDecision::Cloud` is
+  fully wired (budget + latency limits, streamed provider events, result
+  fed back for the local agent to continue). `crates/noema-provider-http`
+  ships `OpenAICompatibleProvider` — configured by model name, base URL,
+  and API key (also in `NoemaConfig::cloud`) — with optional SSE streaming
+  and cancellation. `examples/escalation` shows the wiring and fails
+  gracefully without an API key.
+* Phase 12 — the multimodal agent: text, image, and audio travel as one
+  ordered message; multimodal turns skip the router and flow straight to
+  Gemma, whose reasoning can drive tool calls inside the loop
+  (`examples/multimodal` runs mixed text/image and text/audio on the real
+  engine).
+* Phase 13 — observability: `Noema::metrics()` returns a content-free
+  `MetricsSnapshot` (per-model turns/tokens/latency, per-tool
+  calls/failures/latency, escalation counts), and the same numbers stream
+  as `ModelMetrics` / `ToolMetrics` / `EscalationMetrics` events. Telemetry
+  never records message content.
 * Rig integration (`crates/noema-rig`) — any Noema model drives rig agents
   through a `CompletionModel` adapter (full chat history forwarded by
   default).
@@ -307,10 +336,18 @@ cargo run -p approval-example
 
 # Full agent loop: model → tool → result → answer inside one session.send
 cargo run -p agent-example
+
+# Cloud escalation: router → provider (configured by model, URL, API key)
+cargo run -p escalation-example
+
+# Multimodal: mixed text/image, mixed text/audio, image reasoning → tools
+cargo run -p multimodal-example
 ```
 
 Both engines are local: Gemma runs on CPU via LiteRT-LM, Needle is a
-self-contained 45M-parameter engine. No cloud calls are made.
+self-contained 45M-parameter engine. No cloud calls are made unless cloud
+escalation is explicitly enabled and a provider is registered (the default
+policy is local-only, and `offline_mode` always wins).
 
 The project is being built entirely in Rust with a focus on:
 
@@ -336,6 +373,7 @@ noema/
 │   ├── noema-router/        # initial text router + tool-specific Needle agents
 │   ├── noema-filesearch/    # the reference tool (read-only file search)
 │   ├── noema-approval/      # risk-gated human approval
+│   ├── noema-provider-http/ # OpenAI-compatible cloud provider (model, URL, key)
 │   ├── noema-native/        # stages LiteRT-LM DLLs next to executables
 │   ├── litert-lm-rust/      # vendored Gemma 4 runtime binding
 │   ├── noema-memory/

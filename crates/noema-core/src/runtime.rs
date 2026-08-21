@@ -11,7 +11,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::config::{LogLevel, NoemaConfig};
 use crate::error::{NoemaError, Result};
 use crate::escalation::EscalationPolicy;
-use crate::model::Model;
+use crate::metrics::{MetricsCollector, MetricsSnapshot};
+use crate::model::{Model, ModelProvider};
 use crate::router::Router;
 use crate::session::{Session, SessionState};
 use crate::tooling::ToolFormatter;
@@ -41,9 +42,13 @@ pub struct Noema {
     tools: Option<Arc<ToolRegistry>>,
     tool_formatter: Option<Arc<dyn ToolFormatter>>,
     tool_formatters: HashMap<String, Arc<dyn ToolFormatter>>,
+    /// Cloud escalation providers, keyed by [`ModelProvider::id`].
+    providers: HashMap<String, Arc<dyn ModelProvider>>,
     approval_policy: Arc<ApprovalPolicy>,
     approvals: Arc<ApprovalStore>,
     escalation: Arc<EscalationPolicy>,
+    /// Content-free observability metrics shared by every session.
+    metrics: Arc<MetricsCollector>,
 }
 
 impl Noema {
@@ -82,6 +87,12 @@ impl Noema {
         &self.tool_formatters
     }
 
+    /// The cloud escalation providers registered on this runtime, keyed by
+    /// their [`ModelProvider::id`].
+    pub fn providers(&self) -> &HashMap<String, Arc<dyn ModelProvider>> {
+        &self.providers
+    }
+
     /// The approval policy in effect on this runtime.
     pub fn approval_policy(&self) -> &ApprovalPolicy {
         &self.approval_policy
@@ -90,6 +101,17 @@ impl Noema {
     /// The escalation policy in effect on this runtime.
     pub fn escalation(&self) -> &EscalationPolicy {
         &self.escalation
+    }
+
+    /// A point-in-time snapshot of this runtime's observability metrics.
+    ///
+    /// Content-free by design: model turns, tool calls, and escalations are
+    /// aggregated as counts, latencies, and token totals — never message
+    /// content. The same events stream live on the event bus
+    /// ([`Event::ModelMetrics`], [`Event::ToolMetrics`],
+    /// [`Event::EscalationMetrics`]).
+    pub fn metrics(&self) -> MetricsSnapshot {
+        self.metrics.snapshot()
     }
 
     /// Creates a new ephemeral session and emits [`Event::SessionStarted`].
@@ -114,9 +136,11 @@ impl Noema {
             self.tools.clone(),
             self.tool_formatter.clone(),
             self.tool_formatters.clone(),
+            self.providers.clone(),
             Arc::clone(&self.approval_policy),
             Arc::clone(&self.approvals),
             Arc::clone(&self.escalation),
+            Arc::clone(&self.metrics),
             self.config.limits.clone(),
         ))
     }
@@ -192,6 +216,7 @@ pub struct NoemaBuilder {
     tools: Option<ToolRegistry>,
     tool_formatter: Option<Arc<dyn ToolFormatter>>,
     tool_formatters: HashMap<String, Arc<dyn ToolFormatter>>,
+    providers: HashMap<String, Arc<dyn ModelProvider>>,
     approval_policy: Option<ApprovalPolicy>,
     escalation: Option<EscalationPolicy>,
 }
@@ -287,6 +312,22 @@ impl NoemaBuilder {
         self
     }
 
+    /// Registers a cloud escalation provider.
+    ///
+    /// Providers are abstract ([`ModelProvider`]); the runtime never
+    /// hard-codes one. Call this repeatedly to register several. The
+    /// escalation policy's `preferred_provider` picks which one a request
+    /// uses; with a single provider it is used automatically.
+    ///
+    /// The bundled [`OpenAICompatibleProvider`](noema_provider_http::OpenAICompatibleProvider)
+    /// implements the OpenAI-compatible chat-completions protocol and is
+    /// configured with a model name, base URL, and API key.
+    pub fn with_provider<P: ModelProvider>(mut self, provider: P) -> Self {
+        let id = provider.id().to_string();
+        self.providers.insert(id, Arc::new(provider));
+        self
+    }
+
     /// Overrides the escalation policy.
     ///
     /// By default the policy is built from the runtime configuration (see
@@ -321,9 +362,11 @@ impl NoemaBuilder {
             tools: self.tools.map(Arc::new),
             tool_formatter: self.tool_formatter,
             tool_formatters: self.tool_formatters,
+            providers: self.providers,
             approval_policy: Arc::clone(&approval_policy),
             approvals: Arc::new(ApprovalStore::new()),
             escalation,
+            metrics: Arc::new(MetricsCollector::new()),
         })
     }
 }
@@ -447,6 +490,40 @@ mod tests {
         let tools = noema.tools().expect("registry registered");
         assert_eq!(tools.names(), vec!["test"]);
         assert!(tools.get("test").is_some());
+    }
+
+    #[tokio::test]
+    async fn providers_register_via_the_builder() {
+        let noema = Noema::builder()
+            .with_provider(TestProvider)
+            .build()
+            .await
+            .expect("build");
+        let providers = noema.providers();
+        assert_eq!(providers.len(), 1);
+        assert!(providers.get("test-provider").is_some());
+    }
+
+    /// A no-op cloud provider for builder tests.
+    #[derive(Debug)]
+    struct TestProvider;
+
+    #[async_trait::async_trait]
+    impl ModelProvider for TestProvider {
+        fn id(&self) -> &str {
+            "test-provider"
+        }
+
+        async fn complete(
+            &self,
+            _request: ModelRequest,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<ModelResponse> {
+            Ok(ModelResponse::Text {
+                content: "cloud".into(),
+                usage: None,
+            })
+        }
     }
 
     /// A no-op tool for builder tests.

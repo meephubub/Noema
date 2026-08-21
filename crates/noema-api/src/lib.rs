@@ -49,6 +49,18 @@
 //! `session.format_tool` / `session.execute_tool` without reaching into
 //! `noema-tools`.
 //!
+//! Phase 11 surfaces cloud escalation. Providers stay abstract
+//! ([`ModelProvider`]); the bundled [`OpenAICompatibleProvider`] is
+//! configured with a model name, base URL, and API key and registered via
+//! [`NoemaBuilder::with_provider`]. The same three fields live in
+//! [`NoemaConfig::cloud`] for configuration-file-driven setups.
+//!
+//! Phase 13 surfaces observability: [`Noema::metrics`] returns a
+//! content-free [`MetricsSnapshot`] (model turns, tool calls, escalations,
+//! latencies, token totals), and the same numbers stream live as
+//! [`Event::ModelMetrics`] / [`Event::ToolMetrics`] /
+//! [`Event::EscalationMetrics`].
+//!
 //! ```
 //! use noema_api::prelude::*;
 //!
@@ -84,12 +96,14 @@
 pub mod prelude {
     pub use noema_core::{
         init_logging, ApprovalDecision, ApprovalId, ApprovalPolicy, ApprovalRequest,
-        ApprovalStatus, AudioData, ContentPart, EscalationRequest, ImageData, LogLevel, Message,
-        Model, ModelChunk, ModelOptions, ModelProvider, ModelRequest, ModelResponse, Noema,
-        NoemaBuilder, NoemaConfig, NoemaError, Result, Role, Route, RoutedAction, Router,
-        SendOutcome, Session, SessionState, ToolFormatter, Usage,
+        ApprovalStatus, AudioData, ContentPart, EscalationMetrics, EscalationRequest, ImageData,
+        LogLevel, Message, MetricsSnapshot, Model, ModelChunk, ModelMetrics, ModelOptions,
+        ModelProvider, ModelRequest, ModelResponse, Noema, NoemaBuilder, NoemaConfig, NoemaError,
+        Result, Role, Route, RoutedAction, Router, SendOutcome, Session, SessionState, ToolFormatter,
+        ToolMetrics, Usage,
     };
     pub use noema_events::{Event, EventBus, EventStream, SessionId};
+    pub use noema_provider_http::OpenAICompatibleProvider;
     pub use noema_tools::{
         NoemaTool, RiskLevel, ToolCall, ToolMetadata, ToolRegistry, ToolResult, ToolSchema,
         ToolSummary,
@@ -98,12 +112,13 @@ pub mod prelude {
 
 pub use noema_core::{
     init_logging, ApprovalDecision, ApprovalId, ApprovalPolicy, ApprovalRequest, ApprovalStatus,
-    AudioData, ContentPart, EscalationRequest, ImageData, LogLevel, Message, Model, ModelChunk,
-    ModelOptions, ModelProvider, ModelRequest, ModelResponse, Noema, NoemaBuilder, NoemaConfig,
-    NoemaError, Result, Role, Route, RoutedAction, Router, SendOutcome, Session, SessionState,
-    ToolFormatter, Usage,
+    AudioData, ContentPart, EscalationMetrics, EscalationRequest, ImageData, LogLevel, Message,
+    MetricsSnapshot, Model, ModelChunk, ModelMetrics, ModelOptions, ModelProvider, ModelRequest,
+    ModelResponse, Noema, NoemaBuilder, NoemaConfig, NoemaError, Result, Role, Route,
+    RoutedAction, Router, SendOutcome, Session, SessionState, ToolFormatter, ToolMetrics, Usage,
 };
 pub use noema_events::{Event, EventBus, EventStream, SessionId};
+pub use noema_provider_http::OpenAICompatibleProvider;
 pub use noema_tools::{
     NoemaTool, RiskLevel, ToolCall, ToolMetadata, ToolRegistry, ToolResult, ToolSchema,
     ToolSummary,
@@ -123,5 +138,14 @@ mod tests {
         let _ = SessionState::Active;
         let _ = Message::text(Role::User, "hi");
         let _ = Usage::default();
+        let _ = MetricsSnapshot::default();
+        // The cloud provider is part of the public surface: model name,
+        // base URL, and API key are plain constructor arguments.
+        let _ = OpenAICompatibleProvider::new(
+            "openai",
+            "gpt-4o",
+            "https://api.openai.com/v1",
+            Some("sk-test".into()),
+        );
     }
 }

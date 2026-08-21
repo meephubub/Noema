@@ -14,7 +14,11 @@ use tokio_util::sync::CancellationToken;
 use crate::config::LimitsConfig;
 use crate::error::{NoemaError, Result};
 use crate::escalation::{EscalationDecision, EscalationPolicy};
-use crate::model::{ContentPart, EscalationRequest, Message, Model, ModelRequest, ModelResponse, Role};
+use crate::metrics::{MetricsCollector, MetricsSnapshot};
+use crate::model::{
+    ContentPart, EscalationRequest, Message, Model, ModelProvider, ModelRequest, ModelResponse,
+    Role, Usage,
+};
 use crate::router::{Route, Router, SendOutcome};
 use crate::tooling::ToolFormatter;
 
@@ -43,9 +47,13 @@ pub struct Session {
     tools: Option<Arc<ToolRegistry>>,
     tool_formatter: Option<Arc<dyn ToolFormatter>>,
     tool_formatters: HashMap<String, Arc<dyn ToolFormatter>>,
+    /// Cloud escalation providers, keyed by [`ModelProvider::id`].
+    providers: HashMap<String, Arc<dyn ModelProvider>>,
     approval_policy: Arc<ApprovalPolicy>,
     approvals: Arc<ApprovalStore>,
     escalation: Arc<EscalationPolicy>,
+    /// Content-free observability metrics shared with the runtime.
+    metrics: Arc<MetricsCollector>,
     /// The session-owned conversation. The model is request-driven: each
     /// turn receives the full transcript, so the session (not the model)
     /// keeps ephemeral conversation state.
@@ -65,9 +73,11 @@ impl Session {
         tools: Option<Arc<ToolRegistry>>,
         tool_formatter: Option<Arc<dyn ToolFormatter>>,
         tool_formatters: HashMap<String, Arc<dyn ToolFormatter>>,
+        providers: HashMap<String, Arc<dyn ModelProvider>>,
         approval_policy: Arc<ApprovalPolicy>,
         approvals: Arc<ApprovalStore>,
         escalation: Arc<EscalationPolicy>,
+        metrics: Arc<MetricsCollector>,
         limits: LimitsConfig,
     ) -> Self {
         Self {
@@ -80,9 +90,11 @@ impl Session {
             tools,
             tool_formatter,
             tool_formatters,
+            providers,
             approval_policy,
             approvals,
             escalation,
+            metrics,
             history: Arc::new(Mutex::new(Vec::new())),
             limits,
             current_op: Arc::new(Mutex::new(None)),
@@ -107,6 +119,18 @@ impl Session {
     /// The per-tool formatters available to this session.
     pub fn tool_formatters(&self) -> &HashMap<String, Arc<dyn ToolFormatter>> {
         &self.tool_formatters
+    }
+
+    /// The cloud escalation providers available to this session, keyed by
+    /// their [`ModelProvider::id`].
+    pub fn providers(&self) -> &HashMap<String, Arc<dyn ModelProvider>> {
+        &self.providers
+    }
+
+    /// A point-in-time snapshot of the observability metrics shared with the
+    /// runtime (model turns, tool calls, escalations — content-free).
+    pub fn metrics(&self) -> MetricsSnapshot {
+        self.metrics.snapshot()
     }
 
     /// The approval policy gating risky tool calls on this session.
@@ -199,18 +223,23 @@ impl Session {
         self.events.publish(Event::ToolStarted {
             session_id: self.id.clone(),
         });
+        let tool = call.tool.clone();
+        let started = std::time::Instant::now();
         let result = tools.execute(call).await;
+        let latency_ms = started.elapsed().as_millis() as u64;
         match result {
             Ok(result) => {
                 self.events.publish(Event::ToolCompleted {
                     session_id: self.id.clone(),
                 });
+                self.record_tool_call(&tool, latency_ms, true);
                 Ok(result)
             }
             Err(error) => {
                 self.events.publish(Event::ToolFailed {
                     session_id: self.id.clone(),
                 });
+                self.record_tool_call(&tool, latency_ms, false);
                 Err(NoemaError::Tool(error.to_string()))
             }
         }
@@ -361,20 +390,34 @@ impl Session {
 
         // Initial text routing: plain-text user requests are offered to the
         // router first; handled requests never reach the reasoning model.
-        let escalated = match self.route_message(&message, &token).await {
+        let mut cloud_budget = self.limits.max_cloud_escalations;
+        let mut escalated = false;
+        let mut cloud_context: Option<String> = None;
+        match self.route_message(&message, &token).await {
             RouteOutcome::Routed(outcome) => {
                 *self.current_op.lock().await = None;
                 return Ok(outcome);
             }
-            RouteOutcome::Escalated(request) => match self.start_escalation(&request).await {
-                Ok(()) => true,
-                Err(error) => {
-                    *self.current_op.lock().await = None;
-                    return Err(error);
+            RouteOutcome::Escalated(request) => {
+                match self
+                    .start_escalation(&request, &token, &mut cloud_budget)
+                    .await
+                {
+                    Ok(EscalationRun::Local) => escalated = true,
+                    Ok(EscalationRun::Cloud(text)) => {
+                        escalated = true;
+                        // The cloud model answered; the local agent continues
+                        // below with the result in context.
+                        cloud_context = Some(text);
+                    }
+                    Err(error) => {
+                        *self.current_op.lock().await = None;
+                        return Err(error);
+                    }
                 }
-            },
-            RouteOutcome::Proceed => false,
-        };
+            }
+            RouteOutcome::Proceed => {}
+        }
 
         // Session-owned conversation: append the user message and run the
         // agent loop over the accumulated transcript.
@@ -383,6 +426,9 @@ impl Session {
             history.push(message);
             history.clone()
         };
+        if let Some(text) = cloud_context {
+            transcript.push(Message::text(Role::Assistant, text));
+        }
         let system = self.agent_system();
         let max_iterations = self.limits.max_agent_iterations;
         let max_tool_calls = self.limits.max_tool_calls;
@@ -406,11 +452,47 @@ impl Session {
             if let Some(system) = &system {
                 request = request.with_system(system.clone());
             }
+            let started = std::time::Instant::now();
             let result = model.generate(request, token.clone()).await;
             let response = self.finish_response(result?).await?;
+            let latency_ms = started.elapsed().as_millis() as u64;
+            let usage = match &response {
+                ModelResponse::Text { usage, .. } => *usage,
+                _ => None,
+            };
+            self.record_model_turn(model.id(), latency_ms, usage);
             let (text, usage) = match response {
                 ModelResponse::Text { content, usage } => (content, usage),
                 ModelResponse::Escalate(request) => {
+                    let continue_loop = match self
+                        .start_escalation(&request, &token, &mut cloud_budget)
+                        .await
+                    {
+                        // The local model asked for a bigger model but the
+                        // policy escalates locally; surface the request to
+                        // the caller.
+                        Ok(EscalationRun::Local) => false,
+                        // Cloud answered: feed the result back into the
+                        // conversation and continue the loop (the local
+                        // agent continues).
+                        Ok(EscalationRun::Cloud(text)) => {
+                            escalated = true;
+                            transcript.push(Message::text(Role::Assistant, text));
+                            true
+                        }
+                        Err(error) => {
+                            *self.current_op.lock().await = None;
+                            if escalated {
+                                self.events.publish(Event::EscalationCompleted {
+                                    session_id: self.id.clone(),
+                                });
+                            }
+                            return Err(error);
+                        }
+                    };
+                    if continue_loop {
+                        continue;
+                    }
                     *self.current_op.lock().await = None;
                     if escalated {
                         self.events.publish(Event::EscalationCompleted {
@@ -556,23 +638,54 @@ impl Session {
         candidates.into_iter().next().map(|(_, name)| name)
     }
 
-    /// Applies the escalation policy to a router escalation and, when the
-    /// escalation proceeds, publishes [`Event::EscalationStarted`].
+    /// Applies the escalation policy to an escalation request.
     ///
-    /// The default policy escalates to the local reasoning model; a denied
-    /// escalation is an error. Cloud decisions need a registered provider
-    /// and are not wired yet (the cloud milestone).
-    async fn start_escalation(&self, request: &EscalationRequest) -> Result<()> {
+    /// * [`EscalationDecision::Local`] — the local reasoning model handles
+    ///   the request; nothing more to do here.
+    /// * [`EscalationDecision::Cloud`] — resolves the provider (the policy's
+    ///   `preferred_provider`, or the sole registered one), enforces the
+    ///   cloud-escalation budget and the latency limit, runs the provider
+    ///   (streaming [`Event::ModelStarted`] / [`Event::ModelDelta`] /
+    ///   [`Event::ModelCompleted`]) and returns the answer.
+    /// * [`EscalationDecision::Denied`] — an error.
+    ///
+    /// Every path that starts an escalation publishes
+    /// [`Event::EscalationStarted`]; the caller publishes
+    /// [`Event::EscalationCompleted`] when the send finishes.
+    async fn start_escalation(
+        &self,
+        request: &EscalationRequest,
+        token: &CancellationToken,
+        cloud_budget: &mut usize,
+    ) -> Result<EscalationRun> {
         match self.escalation.decide(request) {
             EscalationDecision::Local => {
                 self.events.publish(Event::EscalationStarted {
                     session_id: self.id.clone(),
                 });
-                Ok(())
+                self.record_escalation(None, None);
+                Ok(EscalationRun::Local)
             }
-            EscalationDecision::Cloud => Err(NoemaError::Escalation(
-                "cloud escalation requires a registered provider (cloud milestone)".into(),
-            )),
+            EscalationDecision::Cloud => {
+                if *cloud_budget == 0 {
+                    return Err(NoemaError::Escalation(format!(
+                        "cloud escalation limit of {} reached for this request",
+                        self.limits.max_cloud_escalations
+                    )));
+                }
+                let provider = self.resolve_provider(self.escalation.preferred_provider.as_deref())?;
+                *cloud_budget -= 1;
+                self.events.publish(Event::EscalationStarted {
+                    session_id: self.id.clone(),
+                });
+                tracing::info!(
+                    provider = %provider.id(),
+                    reason = %request.reason,
+                    "escalating to cloud provider"
+                );
+                let text = self.complete_with_provider(&provider, request, token).await?;
+                Ok(EscalationRun::Cloud(text))
+            }
             EscalationDecision::Denied => {
                 let message = format!("escalation denied by policy: {}", request.reason);
                 self.events.publish(Event::Error {
@@ -582,6 +695,140 @@ impl Session {
                 Err(NoemaError::Escalation(message))
             }
         }
+    }
+
+    /// Resolves the provider for a cloud escalation.
+    ///
+    /// A `preferred` id must be registered; without one, a single
+    /// registered provider is used automatically and multiple providers are
+    /// an error (the policy must disambiguate).
+    fn resolve_provider(&self, preferred: Option<&str>) -> Result<Arc<dyn ModelProvider>> {
+        if let Some(preferred) = preferred {
+            return self.providers.get(preferred).cloned().ok_or_else(|| {
+                NoemaError::Escalation(format!(
+                    "preferred provider '{preferred}' is not registered"
+                ))
+            });
+        }
+        match self.providers.len() {
+            0 => Err(NoemaError::Escalation(
+                "cloud escalation requires a registered provider; register one with \
+                 Noema::builder().with_provider(..)"
+                    .into(),
+            )),
+            1 => Ok(self.providers.values().next().expect("len == 1").clone()),
+            _ => Err(NoemaError::Escalation(
+                "multiple providers are registered; set the escalation policy's \
+                 preferred_provider to choose one"
+                    .into(),
+            )),
+        }
+    }
+
+    /// Runs a cloud provider to completion and returns its answer text.
+    ///
+    /// The escalation request becomes a [`ModelRequest`]: the context is the
+    /// conversation and the reason is carried in the system prompt, so the
+    /// cloud model knows why it was called. The run honours the policy's
+    /// `maximum_latency` and the session's cancellation token, and streams
+    /// the same model events as a local model turn.
+    async fn complete_with_provider(
+        &self,
+        provider: &Arc<dyn ModelProvider>,
+        request: &EscalationRequest,
+        token: &CancellationToken,
+    ) -> Result<String> {
+        let system = format!(
+            "You are Noema's escalation model. The local model escalated this task \
+             because: {}. Answer the request completely and directly.",
+            request.reason
+        );
+        let model_request = ModelRequest::new(request.context.clone()).with_system(system);
+
+        self.events.publish(Event::ModelStarted {
+            session_id: self.id.clone(),
+            model: provider.id().to_string(),
+        });
+        let started = std::time::Instant::now();
+        let result = match self.escalation.maximum_latency {
+            Some(latency) => tokio::time::timeout(
+                latency,
+                provider.complete(model_request, token.clone()),
+            )
+            .await
+            .map_err(|_| {
+                NoemaError::Escalation(format!(
+                    "provider '{}' exceeded the latency limit of {latency:?}",
+                    provider.id()
+                ))
+            })??,
+            None => provider.complete(model_request, token.clone()).await?,
+        };
+
+        let response = self.finish_response(result).await?;
+        let latency_ms = started.elapsed().as_millis() as u64;
+        self.record_escalation(Some(provider.id()), Some(latency_ms));
+        match response {
+            ModelResponse::Text { content, .. } => Ok(content),
+            ModelResponse::Escalate(inner) => Err(NoemaError::Escalation(format!(
+                "provider '{}' escalated again: {}",
+                provider.id(),
+                inner.reason
+            ))),
+            ModelResponse::Stream(_) => unreachable!("finish_response drains streams"),
+        }
+    }
+
+    /// Records a completed model turn: aggregates it, streams
+    /// [`Event::ModelMetrics`], and logs a content-free summary line.
+    fn record_model_turn(&self, model: &str, latency_ms: u64, usage: Option<Usage>) {
+        self.metrics.record_model_turn(model, latency_ms, usage);
+        let (input_tokens, output_tokens) = usage
+            .map(|usage| (usage.input_tokens, usage.output_tokens))
+            .unwrap_or((0, 0));
+        tracing::debug!(
+            model,
+            latency_ms,
+            input_tokens,
+            output_tokens,
+            "model turn completed"
+        );
+        self.events.publish(Event::ModelMetrics {
+            session_id: self.id.clone(),
+            model: model.to_string(),
+            latency_ms,
+            input_tokens: usage.map(|u| u.input_tokens),
+            output_tokens: usage.map(|u| u.output_tokens),
+        });
+    }
+
+    /// Records an executed tool call: aggregates it, streams
+    /// [`Event::ToolMetrics`], and logs a content-free summary line.
+    fn record_tool_call(&self, tool: &str, latency_ms: u64, success: bool) {
+        self.metrics.record_tool_call(tool, latency_ms, success);
+        tracing::debug!(tool, latency_ms, success, "tool call completed");
+        self.events.publish(Event::ToolMetrics {
+            session_id: self.id.clone(),
+            tool: tool.to_string(),
+            latency_ms,
+            success,
+        });
+    }
+
+    /// Records an escalation: aggregates it, streams
+    /// [`Event::EscalationMetrics`], and logs a content-free summary line.
+    fn record_escalation(&self, provider: Option<&str>, latency_ms: Option<u64>) {
+        self.metrics.record_escalation(provider, latency_ms);
+        tracing::debug!(
+            provider = provider.unwrap_or("local"),
+            latency_ms,
+            "escalation recorded"
+        );
+        self.events.publish(Event::EscalationMetrics {
+            session_id: self.id.clone(),
+            provider: provider.map(str::to_owned),
+            latency_ms,
+        });
     }
 
     /// Routes a plain-text user message through the registered router.
@@ -747,10 +994,20 @@ enum RouteOutcome {
     Proceed,
 }
 
+/// What an escalation policy run decided.
+#[derive(Debug)]
+enum EscalationRun {
+    /// Escalate locally: the local reasoning model handles the request.
+    Local,
+    /// A cloud provider answered; the text is fed into the conversation so
+    /// the local agent continues with the result.
+    Cloud(String),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ContentPart, ModelChunk, ModelRequest, ModelResponse, Role};
+    use crate::model::{ContentPart, EscalationRequest, ModelChunk, ModelRequest, ModelResponse, Role};
     use crate::router::RoutedAction;
 
     #[derive(Debug)]
@@ -805,9 +1062,11 @@ mod tests {
             None,
             None,
             HashMap::new(),
+            HashMap::new(),
             Arc::new(ApprovalPolicy::default()),
             Arc::new(ApprovalStore::new()),
             escalation,
+            Arc::new(MetricsCollector::new()),
             LimitsConfig::default(),
         )
     }
@@ -826,9 +1085,11 @@ mod tests {
             Some(Arc::new(tools)),
             formatter,
             HashMap::new(),
+            HashMap::new(),
             Arc::new(ApprovalPolicy::default()),
             Arc::new(ApprovalStore::new()),
             Arc::new(EscalationPolicy::default()),
+            Arc::new(MetricsCollector::new()),
             LimitsConfig::default(),
         )
     }
@@ -847,10 +1108,39 @@ mod tests {
             Some(Arc::new(tools)),
             None,
             HashMap::new(),
+            HashMap::new(),
             Arc::new(policy),
             Arc::new(ApprovalStore::new()),
             Arc::new(EscalationPolicy::default()),
+            Arc::new(MetricsCollector::new()),
             LimitsConfig::default(),
+        )
+    }
+
+    /// A session with cloud providers and full escalation control.
+    #[allow(clippy::too_many_arguments)]
+    fn test_session_with_providers(
+        model: Option<Arc<dyn Model>>,
+        router: Option<Arc<dyn Router>>,
+        escalation: Arc<EscalationPolicy>,
+        providers: HashMap<String, Arc<dyn ModelProvider>>,
+        limits: LimitsConfig,
+    ) -> Session {
+        Session::new(
+            SessionId::generate(),
+            EventBus::default(),
+            Arc::new(Mutex::new(SessionState::Active)),
+            model,
+            router,
+            None,
+            None,
+            HashMap::new(),
+            providers,
+            Arc::new(ApprovalPolicy::default()),
+            Arc::new(ApprovalStore::new()),
+            escalation,
+            Arc::new(MetricsCollector::new()),
+            limits,
         )
     }
 
@@ -870,9 +1160,11 @@ mod tests {
             Some(Arc::new(tools)),
             formatter,
             HashMap::new(),
+            HashMap::new(),
             Arc::new(ApprovalPolicy::default()),
             Arc::new(ApprovalStore::new()),
             Arc::new(EscalationPolicy::default()),
+            Arc::new(MetricsCollector::new()),
             limits,
         )
     }
@@ -901,9 +1193,11 @@ mod tests {
             None,
             None,
             HashMap::new(),
+            HashMap::new(),
             Arc::new(ApprovalPolicy::default()),
             Arc::new(ApprovalStore::new()),
             Arc::new(EscalationPolicy::default()),
+            Arc::new(MetricsCollector::new()),
             LimitsConfig::default(),
         );
 
@@ -1191,6 +1485,11 @@ mod tests {
             events.next().await,
             Some(Event::EscalationStarted { .. })
         ));
+        // The escalation's observability event follows the started event.
+        assert!(matches!(
+            events.next().await,
+            Some(Event::EscalationMetrics { .. })
+        ));
         assert!(matches!(
             events.next().await,
             Some(Event::ModelStarted { .. })
@@ -1215,6 +1514,96 @@ mod tests {
         );
         let outcome = session.send(message).await.expect("send");
         assert!(outcome.into_model().is_some(), "multimodal skips the router");
+    }
+
+    /// A model that only names a tool when its request actually carried an
+    /// image part — so the tool running at all proves the multimodal
+    /// content reached the model through the agent loop.
+    #[derive(Debug)]
+    struct MultimodalToolModel;
+
+    #[async_trait::async_trait]
+    impl Model for MultimodalToolModel {
+        fn id(&self) -> &str {
+            "multimodal-tool"
+        }
+
+        async fn generate(
+            &self,
+            request: ModelRequest,
+            _cancel: CancellationToken,
+        ) -> Result<ModelResponse> {
+            let saw_image = request.messages.iter().any(|m| {
+                m.content
+                    .iter()
+                    .any(|part| matches!(part, ContentPart::Image(_)))
+            });
+            // First call: the request is just the multimodal user message.
+            // Only if it actually contains the image does the model decide
+            // to use a tool.
+            if saw_image && request.messages.len() == 1 {
+                Ok(ModelResponse::Text {
+                    content: "I will use the echo tool to describe the image.".into(),
+                    usage: None,
+                })
+            } else {
+                Ok(ModelResponse::Text {
+                    content: "the image shows a red square".into(),
+                    usage: None,
+                })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn multimodal_turn_can_drive_tool_use() {
+        // Audio/image → Gemma 4 → reasoning → tools → response: a mixed
+        // text+image user turn flows straight to the model (no router), the
+        // model's reply names a registered tool, the loop formats and
+        // executes it, and the result comes back as the final answer.
+        let model = Arc::new(MultimodalToolModel);
+        let (registry, runs) = recording_registry("echo", RiskLevel::Low);
+        let session = test_session_with_limits(
+            Some(model.clone()),
+            registry,
+            Some(Arc::new(FixedFormatter(ToolCall::new("echo")))),
+            LimitsConfig::default(),
+        );
+        let mut events = session.events();
+
+        let message = Message::new(
+            Role::User,
+            vec![
+                ContentPart::text("describe this image"),
+                ContentPart::image(vec![1, 2, 3], "image/png"),
+            ],
+        );
+        let outcome = session.send(message).await.expect("send");
+        let response = outcome.into_model().expect("model outcome");
+        match response {
+            ModelResponse::Text { content, .. } => {
+                assert_eq!(content, "the image shows a red square")
+            }
+            other => panic!("expected the final answer, got {other:?}"),
+        }
+
+        // The tool ran exactly once — which the model only asks for when it
+        // saw the image part in its first request.
+        assert_eq!(
+            runs.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the multimodal turn drove one tool call"
+        );
+
+        // The tool events were streamed as usual.
+        let mut saw_tool_requested = false;
+        while let Some(event) = events.next().await {
+            if matches!(event, Event::ToolRequested { .. }) {
+                saw_tool_requested = true;
+                break;
+            }
+        }
+        assert!(saw_tool_requested, "ToolRequested was not emitted");
     }
 
     #[tokio::test]
@@ -1295,7 +1684,13 @@ mod tests {
                     seen.push(event);
                     break;
                 }
-                Event::UserMessageReceived { .. } | Event::RoutingStarted { .. } | Event::ModelDelta { .. } => {}
+                // Observability events and turn noise do not participate in
+                // this flow's expected sequence.
+                Event::UserMessageReceived { .. }
+                | Event::RoutingStarted { .. }
+                | Event::ModelDelta { .. }
+                | Event::ModelMetrics { .. }
+                | Event::EscalationMetrics { .. } => {}
                 _ => break,
             }
         }
@@ -1342,6 +1737,452 @@ mod tests {
             matches!(result, Err(NoemaError::Escalation(_))),
             "denied escalation should error, got {result:?}"
         );
+    }
+
+    /// A stub cloud provider: counts calls, optionally sleeps, and echoes
+    /// the user's context so tests can assert what was sent.
+    #[derive(Debug)]
+    struct TestProvider {
+        id: &'static str,
+        answer: &'static str,
+        calls: std::sync::Mutex<usize>,
+        delay: Option<std::time::Duration>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for TestProvider {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        async fn complete(
+            &self,
+            request: ModelRequest,
+            _cancel: CancellationToken,
+        ) -> Result<ModelResponse> {
+            *self.calls.lock().unwrap() += 1;
+            if let Some(delay) = self.delay {
+                tokio::time::sleep(delay).await;
+            }
+            let asked = request
+                .messages
+                .iter()
+                .filter_map(|m| match m.content.first() {
+                    Some(ContentPart::Text(t)) => Some(t.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            Ok(ModelResponse::Text {
+                content: format!("{} (context: {asked})", self.answer),
+                usage: None,
+            })
+        }
+    }
+
+    fn cloud_policy() -> EscalationPolicy {
+        EscalationPolicy {
+            allow_local: false,
+            allow_cloud: true,
+            ..EscalationPolicy::default()
+        }
+    }
+
+    fn provider_map(providers: Vec<TestProvider>) -> HashMap<String, Arc<dyn ModelProvider>> {
+        providers
+            .into_iter()
+            .map(|p| {
+                let id = p.id.to_string();
+                (id, Arc::new(p) as Arc<dyn ModelProvider>)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn cloud_escalation_runs_the_provider_and_continues() {
+        let provider: Arc<TestProvider> = Arc::new(TestProvider {
+            id: "cloud",
+            answer: "Paris is the capital of France.",
+            calls: std::sync::Mutex::new(0),
+            delay: None,
+        });
+        let providers = HashMap::from([(
+            "cloud".to_string(),
+            provider.clone() as Arc<dyn ModelProvider>,
+        )]);
+        let session = test_session_with_providers(
+            Some(Arc::new(EchoModel)),
+            Some(Arc::new(EscalatingRouter)),
+            Arc::new(cloud_policy()),
+            providers,
+            LimitsConfig::default(),
+        );
+        let mut events = session.events();
+
+        let outcome = session
+            .send(Message::text(Role::User, "what is the capital of france"))
+            .await
+            .expect("send")
+            .into_model()
+            .expect("model outcome");
+        match outcome {
+            ModelResponse::Text { content, .. } => {
+                // The cloud answer is fed back and the local agent continues.
+                assert!(
+                    content.contains("Paris is the capital of France."),
+                    "final answer should carry the cloud result: {content}"
+                );
+            }
+            other => panic!("expected text response, got {other:?}"),
+        }
+        assert_eq!(
+            *provider.calls.lock().unwrap(),
+            1,
+            "provider ran exactly once"
+        );
+
+        // The cloud run streams model events under the provider's id.
+        let mut saw_started = false;
+        let mut saw_completed = false;
+        let mut saw_cloud_model = false;
+        while let Some(event) = events.next().await {
+            match event {
+                Event::EscalationStarted { .. } => saw_started = true,
+                Event::EscalationCompleted { .. } => {
+                    saw_completed = true;
+                    break;
+                }
+                Event::ModelStarted { model, .. } if model == "cloud" => saw_cloud_model = true,
+                _ => {}
+            }
+        }
+        assert!(saw_started, "EscalationStarted emitted");
+        assert!(saw_completed, "EscalationCompleted emitted");
+        assert!(saw_cloud_model, "provider ran under its own model id");
+    }
+
+    #[tokio::test]
+    async fn cloud_escalation_uses_the_preferred_provider() {
+        let providers = provider_map(vec![
+            TestProvider {
+                id: "alpha",
+                answer: "from alpha",
+                calls: std::sync::Mutex::new(0),
+                delay: None,
+            },
+            TestProvider {
+                id: "beta",
+                answer: "from beta",
+                calls: std::sync::Mutex::new(0),
+                delay: None,
+            },
+        ]);
+        let policy = EscalationPolicy {
+            preferred_provider: Some("beta".into()),
+            ..cloud_policy()
+        };
+        let session = test_session_with_providers(
+            Some(Arc::new(EchoModel)),
+            Some(Arc::new(EscalatingRouter)),
+            Arc::new(policy),
+            providers,
+            LimitsConfig::default(),
+        );
+
+        let outcome = session
+            .send(Message::text(Role::User, "hi"))
+            .await
+            .expect("send")
+            .into_model()
+            .expect("model outcome");
+        match outcome {
+            ModelResponse::Text { content, .. } => {
+                assert!(content.contains("from beta"), "beta ran: {content}");
+                assert!(!content.contains("from alpha"));
+            }
+            other => panic!("expected text response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn multiple_providers_without_a_preferred_one_error() {
+        let providers = provider_map(vec![
+            TestProvider {
+                id: "alpha",
+                answer: "a",
+                calls: std::sync::Mutex::new(0),
+                delay: None,
+            },
+            TestProvider {
+                id: "beta",
+                answer: "b",
+                calls: std::sync::Mutex::new(0),
+                delay: None,
+            },
+        ]);
+        let session = test_session_with_providers(
+            Some(Arc::new(EchoModel)),
+            Some(Arc::new(EscalatingRouter)),
+            Arc::new(cloud_policy()),
+            providers,
+            LimitsConfig::default(),
+        );
+
+        let error = session
+            .send(Message::text(Role::User, "hi"))
+            .await
+            .expect_err("ambiguous providers");
+        assert!(matches!(error, NoemaError::Escalation(_)));
+    }
+
+    #[tokio::test]
+    async fn cloud_escalation_honours_the_latency_limit() {
+        let providers = provider_map(vec![TestProvider {
+            id: "cloud",
+            answer: "slow",
+            calls: std::sync::Mutex::new(0),
+            delay: Some(std::time::Duration::from_millis(500)),
+        }]);
+        let policy = EscalationPolicy {
+            maximum_latency: Some(std::time::Duration::from_millis(20)),
+            ..cloud_policy()
+        };
+        let session = test_session_with_providers(
+            Some(Arc::new(EchoModel)),
+            Some(Arc::new(EscalatingRouter)),
+            Arc::new(policy),
+            providers,
+            LimitsConfig::default(),
+        );
+
+        let error = session
+            .send(Message::text(Role::User, "hi"))
+            .await
+            .expect_err("latency limit exceeded");
+        assert!(matches!(error, NoemaError::Escalation(_)));
+        assert!(error.to_string().contains("latency"));
+    }
+
+    #[tokio::test]
+    async fn cloud_escalation_budget_is_enforced() {
+        let providers = provider_map(vec![TestProvider {
+            id: "cloud",
+            answer: "answer",
+            calls: std::sync::Mutex::new(0),
+            delay: None,
+        }]);
+        let limits = LimitsConfig {
+            max_cloud_escalations: 0,
+            ..LimitsConfig::default()
+        };
+        let session = test_session_with_providers(
+            Some(Arc::new(EchoModel)),
+            Some(Arc::new(EscalatingRouter)),
+            Arc::new(cloud_policy()),
+            providers,
+            limits,
+        );
+
+        let error = session
+            .send(Message::text(Role::User, "hi"))
+            .await
+            .expect_err("budget exhausted");
+        assert!(matches!(error, NoemaError::Escalation(_)));
+        assert!(error.to_string().contains("limit"));
+    }
+
+    /// A model that escalates once, then answers — for the mid-loop cloud
+    /// path (the local agent decides a task is too hard, the cloud answers,
+    /// and the loop continues).
+    #[derive(Debug)]
+    struct EscalateThenAnswer;
+
+    #[async_trait::async_trait]
+    impl Model for EscalateThenAnswer {
+        fn id(&self) -> &str {
+            "escalate-then-answer"
+        }
+
+        async fn generate(
+            &self,
+            request: ModelRequest,
+            _cancel: CancellationToken,
+        ) -> Result<ModelResponse> {
+            let cloud_already_answered = request.messages.iter().any(|m| {
+                m.role == Role::Assistant
+                    && m.content.iter().any(|part| {
+                        matches!(part, ContentPart::Text(t) if t.contains("cloud says"))
+                    })
+            });
+            if cloud_already_answered {
+                Ok(ModelResponse::Text {
+                    content: "final answer after the cloud result".into(),
+                    usage: None,
+                })
+            } else {
+                Ok(ModelResponse::Escalate(EscalationRequest::new(
+                    "requires substantially larger reasoning capacity",
+                    request.messages.clone(),
+                )))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mid_loop_model_escalation_goes_to_cloud_and_continues() {
+        let provider: Arc<TestProvider> = Arc::new(TestProvider {
+            id: "cloud",
+            answer: "cloud says the answer is 42",
+            calls: std::sync::Mutex::new(0),
+            delay: None,
+        });
+        let providers = HashMap::from([(
+            "cloud".to_string(),
+            provider.clone() as Arc<dyn ModelProvider>,
+        )]);
+        let session = test_session_with_providers(
+            Some(Arc::new(EscalateThenAnswer)),
+            None,
+            Arc::new(cloud_policy()),
+            providers,
+            LimitsConfig::default(),
+        );
+
+        let outcome = session
+            .send(Message::text(Role::User, "solve this hard problem"))
+            .await
+            .expect("send")
+            .into_model()
+            .expect("model outcome");
+        match outcome {
+            ModelResponse::Text { content, .. } => {
+                assert_eq!(content, "final answer after the cloud result");
+            }
+            other => panic!("expected the loop to continue, got {other:?}"),
+        }
+        assert_eq!(
+            *provider.calls.lock().unwrap(),
+            1,
+            "cloud provider ran once during the loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_turn_metrics_are_recorded_and_streamed() {
+        let session = test_session(Some(Arc::new(EchoModel)));
+        let mut events = session.events();
+
+        session
+            .send(Message::text(Role::User, "hi"))
+            .await
+            .expect("send")
+            .into_model()
+            .expect("model outcome");
+
+        let snapshot = session.metrics();
+        let echo = snapshot.models.get("echo").expect("echo metrics");
+        assert_eq!(echo.turns, 1, "one model turn recorded");
+        assert_eq!(snapshot.total_model_turns(), 1);
+
+        let mut saw = false;
+        while let Some(event) = events.next().await {
+            if matches!(event, Event::ModelMetrics { model, .. } if model == "echo") {
+                saw = true;
+                break;
+            }
+        }
+        assert!(saw, "ModelMetrics event was not streamed");
+    }
+
+    #[tokio::test]
+    async fn tool_metrics_are_recorded_and_streamed() {
+        let mut registry = ToolRegistry::new();
+        registry.register(EchoTool).expect("register");
+        let session = test_session_with_tools(registry, None);
+        let mut events = session.events();
+
+        session
+            .execute_tool(ToolCall::new("echo"))
+            .await
+            .expect("tool runs");
+
+        let snapshot = session.metrics();
+        let echo = snapshot.tools.get("echo").expect("echo tool metrics");
+        assert_eq!(echo.calls, 1);
+        assert!(echo.all_succeeded());
+        assert_eq!(snapshot.total_tool_calls(), 1);
+
+        let mut saw = false;
+        while let Some(event) = events.next().await {
+            if matches!(event, Event::ToolMetrics { tool, success, .. } if tool == "echo" && success) {
+                saw = true;
+                break;
+            }
+        }
+        assert!(saw, "ToolMetrics event was not streamed");
+    }
+
+    #[tokio::test]
+    async fn local_escalation_metrics_are_recorded() {
+        let session = test_session_with_router(
+            Some(Arc::new(EchoModel)),
+            Some(Arc::new(EscalatingRouter)),
+        );
+        session
+            .send(Message::text(Role::User, "go to settings"))
+            .await
+            .expect("send")
+            .into_model()
+            .expect("model outcome");
+
+        let snapshot = session.metrics();
+        assert_eq!(snapshot.escalation.escalations, 1);
+        assert_eq!(snapshot.escalation.cloud_escalations, 0);
+    }
+
+    #[tokio::test]
+    async fn cloud_escalation_metrics_are_recorded() {
+        let providers = provider_map(vec![TestProvider {
+            id: "cloud",
+            answer: "answer",
+            calls: std::sync::Mutex::new(0),
+            delay: None,
+        }]);
+        let session = test_session_with_providers(
+            Some(Arc::new(EchoModel)),
+            Some(Arc::new(EscalatingRouter)),
+            Arc::new(cloud_policy()),
+            providers,
+            LimitsConfig::default(),
+        );
+        let mut events = session.events();
+
+        session
+            .send(Message::text(Role::User, "hi"))
+            .await
+            .expect("send")
+            .into_model()
+            .expect("model outcome");
+
+        let snapshot = session.metrics();
+        assert_eq!(snapshot.escalation.escalations, 1);
+        assert_eq!(snapshot.escalation.cloud_escalations, 1);
+
+        let mut saw = false;
+        while let Some(event) = events.next().await {
+            if matches!(
+                event,
+                Event::EscalationMetrics {
+                    provider: Some(provider),
+                    latency_ms: Some(_),
+                    ..
+                } if provider == "cloud"
+            ) {
+                saw = true;
+                break;
+            }
+        }
+        assert!(saw, "EscalationMetrics event was not streamed for the provider");
     }
 
     #[tokio::test]
@@ -1464,9 +2305,11 @@ mod tests {
             Some(Arc::new(registry)),
             None,
             HashMap::new(),
+            HashMap::new(),
             Arc::new(ApprovalPolicy::default()),
             Arc::new(ApprovalStore::new()),
             Arc::new(EscalationPolicy::default()),
+            Arc::new(MetricsCollector::new()),
             LimitsConfig::default(),
         );
         let mut events = bus.subscribe(id.clone());

@@ -82,6 +82,8 @@ against the real engines (or degrades gracefully without them):
 | Filesearch | `cargo run -p filesearch-example` | Phase 7 chain: Gemma semantic request → Needle format → filesystem → result → Gemma |
 | Approval | `cargo run -p approval-example` | Phase 8: risky call pauses for approve / reject / expire |
 | Agent | `cargo run -p agent-example` | Phase 10: the full agent loop inside one `session.send` |
+| Escalation | `cargo run -p escalation-example` | Phase 11: config-driven cloud provider (model/URL/key); graceful failure without a key |
+| Multimodal | `cargo run -p multimodal-example` | Phase 12: mixed text/image, mixed text/audio, and image reasoning → tools on the real engine |
 
 `gemma-example`, `router-example`, `filesearch-example`, and `agent-example`
 load the 2.5 GB Gemma model and take a while to start. The other examples
@@ -139,7 +141,8 @@ while let Some(event) = events.next().await {
 
 The frontend subscribes and reacts; it never polls for agent state. The full
 event vocabulary is in `crates/noema-events` (session lifecycle, routing,
-model, tools, approvals, memory, escalation, errors).
+model, tools, approvals, memory, escalation, errors, and the content-free
+`ModelMetrics` / `ToolMetrics` / `EscalationMetrics` observability events).
 
 `send` returns a `SendOutcome`:
 
@@ -197,8 +200,55 @@ When the router escalates — or a model requests escalation — an
 `EscalationPolicy` decides what happens: escalate to the local model
 (`Local`), escalate to a cloud provider (`Cloud`), or deny. The default
 policy escalates locally and never to the cloud; `offline_mode` always wins.
-Cloud escalation is the phase-11 milestone (the `ModelProvider` abstraction
-exists; no provider is wired yet).
+
+Cloud escalation (Phase 11) is a general abstraction. Providers implement
+`ModelProvider` and are registered on the runtime; the core never
+hard-codes one:
+
+```rust
+use noema_api::prelude::*;
+
+// Model name, base URL, and API key — the whole provider configuration.
+let provider = OpenAICompatibleProvider::new(
+    "openai",                             // provider id (policy's preferred_provider)
+    "gemini-2.5-pro",                     // model name
+    "https://generativelanguage.googleapis.com/v1beta/openai", // base URL
+    std::env::var("GEMINI_API_KEY").ok(), // API key (None for local endpoints)
+);
+
+let noema = Noema::builder()
+    .with_provider(provider)
+    .with_escalation_policy(EscalationPolicy {
+        allow_local: false,
+        allow_cloud: true,
+        preferred_provider: Some("openai".into()),
+        maximum_latency: Some(std::time::Duration::from_secs(30)),
+        ..EscalationPolicy::default()
+    })
+    .build()
+    .await?;
+```
+
+With several providers registered, the policy's `preferred_provider` picks
+one; a single provider is used automatically. When the policy chooses
+`Cloud`, the session resolves the provider, enforces the per-request budget
+(`LimitsConfig::max_cloud_escalations`) and `maximum_latency`, streams the
+provider's turn under its own model id (`ModelStarted` / `ModelDelta` /
+`ModelCompleted`), and feeds the answer back so the **local agent
+continues** — for both router escalations (Needle → cloud) and mid-loop
+model escalations (Gemma → cloud). The same three fields live in
+`NoemaConfig::cloud` (`model`, `base_url`, `api_key`) for
+configuration-file-driven setups; `noema-api` re-exports
+`OpenAICompatibleProvider`.
+
+`OpenAICompatibleProvider` speaks the OpenAI chat-completions protocol, so
+it reaches Gemini (OpenAI-compatible endpoint), OpenAI, Ollama, vLLM,
+LocalAI, and friends; `with_streaming(true)` switches on SSE streaming, and
+every request honours the session's cancellation token. Cost limits
+(`maximum_cost`) remain policy fields awaiting provider-reported pricing;
+latency limits are enforced as a timeout. Without an API key, `examples/escalation`
+demonstrates the wiring and fails gracefully with a clear escalation error
+(no real-endpoint test ships).
 
 ### 5.7 Tools
 
@@ -294,9 +344,62 @@ only ever imports that one crate: `ApprovalId`, `ApprovalRequest`,
 
 `NoemaConfig` is strongly typed with sensible defaults (see
 `crates/noema-core/src/config.rs`): gemma/needle/cloud/memory/tools/risk/
-approval/limits/logging/streaming sections plus `offline_mode`. Override via
+approval/limits/logging/streaming sections plus `offline_mode`. The `cloud`
+section carries `enabled`, `preferred_provider`, and the provider's three
+fields — `model`, `base_url`, `api_key` — plus `maximum_cost` and
+`maximum_latency_ms` (enforced as the escalation timeout). Override via
 `Noema::builder().with_config(..)` or the convenience setters
-(`with_logging`, `with_approval_policy`, `with_escalation_policy`, …).
+(`with_logging`, `with_approval_policy`, `with_escalation_policy`,
+`with_provider`, …).
+
+### 5.11 Observability
+
+Every runtime keeps content-free metrics (Phase 13). A point-in-time
+snapshot is available at any time:
+
+```rust
+use noema_api::prelude::*;
+
+// After some activity:
+let metrics: MetricsSnapshot = noema.metrics();
+println!("model turns: {}", metrics.total_model_turns());
+println!("input tokens: {}", metrics.total_input_tokens());
+println!("tool calls: {} ({} failed)", metrics.total_tool_calls(), metrics.total_tool_failures());
+println!("cloud escalations: {}", metrics.cloud_escalations());
+// Per-model / per-tool breakdowns:
+// metrics.models.get("gemma")  → ModelMetrics { turns, input_tokens, output_tokens, latency_ms }
+// metrics.tools.get("search_files") → ToolMetrics { calls, failures, latency_ms }
+```
+
+The same numbers stream live on the event bus as `ModelMetrics`,
+`ToolMetrics`, and `EscalationMetrics` events (per model turn, per tool
+call, per escalation), and every record emits a content-free `tracing`
+debug line. Observability is **privacy-aware by design**: metrics and logs
+carry identifiers, counts, latencies, and token totals — never message
+content.
+
+### 5.12 Multimodal input
+
+Text, image, and audio travel as one ordered message — `ContentPart::Text`
+/ `Image` / `Audio`, in any combination — and multimodal user turns skip
+the text router, going straight to Gemma:
+
+```rust
+use noema_api::prelude::*;
+
+let message = Message::new(Role::User, vec![
+    ContentPart::text("What color is this image?"),
+    ContentPart::image(png_bytes, "image/png"),
+]);
+// ...also ContentPart::audio(wav_bytes, "audio/wav"), or all three.
+```
+
+The agent loop treats multimodal turns like any other: an image turn's
+reasoning can name a tool, which is then formatted and executed inside the
+same `session.send`. The current Gemma 4 E2B checkpoint has a working
+vision channel but no audio channel: image turns answer directly, while
+audio turns are accepted and declined gracefully. `examples/multimodal`
+shows all three paths on the real engine.
 
 ---
 

@@ -127,6 +127,13 @@ impl Default for NeedleConfig {
 }
 
 /// Cloud escalation configuration.
+///
+/// The `model` / `base_url` / `api_key` fields describe a single
+/// OpenAI-compatible endpoint and are the easy path to a configured
+/// provider: [`crate::Noema::builder`] exposes `with_provider` for full
+/// control, and the frontend can also build an
+/// [`OpenAICompatibleProvider`](noema_provider_http::OpenAICompatibleProvider)
+/// straight from this section.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CloudConfig {
@@ -134,7 +141,19 @@ pub struct CloudConfig {
     pub enabled: bool,
     /// The preferred provider id (e.g. `gemini`, `openai`).
     pub preferred_provider: Option<String>,
+    /// The model name served by the provider, e.g. `gemini-2.5-pro` or
+    /// `gpt-4o`. Exposed to the API so the frontend can configure it.
+    pub model: Option<String>,
+    /// The provider's base URL, e.g.
+    /// `https://generativelanguage.googleapis.com/v1beta/openai` or
+    /// `http://localhost:11434/v1` for a local OpenAI-compatible server.
+    pub base_url: Option<String>,
+    /// The API key used to authenticate with the provider. `None` is fine
+    /// for local endpoints that need no authentication.
+    pub api_key: Option<String>,
     /// Maximum allowed cost per escalation, if a provider reports cost.
+    /// (Enforcement requires provider-reported pricing and is not wired
+    /// yet; the field is kept for policy completeness.)
     pub maximum_cost: Option<f64>,
     /// Maximum allowed latency per escalation, in milliseconds.
     pub maximum_latency_ms: Option<u64>,
@@ -145,6 +164,9 @@ impl Default for CloudConfig {
         Self {
             enabled: false,
             preferred_provider: None,
+            model: None,
+            base_url: None,
+            api_key: None,
             maximum_cost: None,
             maximum_latency_ms: None,
         }
@@ -310,6 +332,20 @@ mod tests {
         assert_eq!(config.streaming.event_capacity, 1024);
         assert!(config.limits.max_agent_iterations > 0);
         assert!(config.risk.require_approval_above.is_some());
+    }
+
+    #[test]
+    fn cloud_config_exposes_model_url_and_key() {
+        let mut config = NoemaConfig::default();
+        config.cloud.enabled = true;
+        config.cloud.model = Some("gemini-2.5-pro".into());
+        config.cloud.base_url =
+            Some("https://generativelanguage.googleapis.com/v1beta/openai".into());
+        config.cloud.api_key = Some("secret".into());
+
+        assert_eq!(config.cloud.model.as_deref(), Some("gemini-2.5-pro"));
+        assert!(config.cloud.base_url.as_deref().unwrap().contains("googleapis"));
+        assert_eq!(config.cloud.api_key.as_deref(), Some("secret"));
     }
 
     #[test]

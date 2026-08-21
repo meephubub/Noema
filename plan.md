@@ -2027,14 +2027,53 @@ Implementation status:
   `Error` event rather than aborting the send; rejected approvals and tool
   failures abort. Multi-turn memory now works at the session level for any
   model. `examples/agent` runs the loop against the real engines.
+* Phase 11 (Cloud Escalation) — done. Escalation is now a general,
+  configurable abstraction. The runtime holds a registry of
+  [`ModelProvider`]s (keyed by provider id; `NoemaBuilder::with_provider`
+  registers one, `Noema::providers()` exposes them, and sessions resolve by
+  the policy's `preferred_provider` or fall back to a sole registration).
+  `EscalationDecision::Cloud` is fully wired: `Session::start_escalation`
+  resolves the provider, enforces the per-request budget
+  (`LimitsConfig::max_cloud_escalations`) and the policy's
+  `maximum_latency` (a tokio timeout), runs the provider streaming
+  `ModelStarted` / `ModelDelta` / `ModelCompleted` under the provider's id,
+  and feeds the answer back so the local agent continues — for both
+  router escalations (Needle → cloud) and mid-loop model escalations
+  (Gemma → cloud). `crates/noema-provider-http` ships the general
+  [`OpenAICompatibleProvider`], which speaks the OpenAI chat-completions
+  protocol to Gemini, OpenAI, Ollama, vLLM, and friends from just a model
+  name, base URL, and API key (the same three fields live in
+  [`NoemaConfig::cloud`]), with optional SSE streaming and cancellation.
+  `examples/escalation` shows the config + policy + provider wiring and
+  fails gracefully without a key (no real-endpoint test ships, per the
+  no-key constraint). `noema-api` re-exports the provider. Cost limits stay
+  policy fields awaiting provider-reported pricing.
+* Phase 12 (Multimodal Agent) — done. Text, image, and audio flow through
+  one ordered [`ContentPart`] message abstraction (`ContentPart::Text` /
+  `Image` / `Audio`, in any combination), multimodal user turns skip the
+  text router and go straight to Gemma, and the agent loop treats them like
+  any other turn — an image turn's reasoning can drive a tool call
+  (`multimodal_turn_can_drive_tool_use` proves image → reasoning → tool →
+  response in the loop). `examples/multimodal` runs the plan's paths on the
+  real engine: mixed text/image (verified: the E2B checkpoint describes
+  `red.png`), mixed text/audio (accepted and declined gracefully — the
+  checkpoint has no audio channel; a future audio-capable checkpoint
+  answers directly with no code changes), and an image turn whose reasoning
+  attempts a filesearch tool call (best-effort: the small checkpoint is not
+  reliably agentic, so the loop answers directly when it does not name the
+  tool).
+* Phase 13 (Observability) — done. `crates/noema-core/src/metrics.rs`
+  adds a content-free [`MetricsCollector`] per runtime: every model turn
+  (per-model turns, input/output tokens, latency), tool call (per-tool
+  calls, failures, latency), and escalation (counts, cloud counts,
+  provider latency) is aggregated and surfaced as a [`MetricsSnapshot`]
+  through [`Noema::metrics`] / [`Session::metrics`]. The same numbers
+  stream live on the event bus as `ModelMetrics` / `ToolMetrics` /
+  `EscalationMetrics` events, and every record emits a content-free
+  `tracing::debug!` line (model id, latency, tokens — never message
+  content). Telemetry is privacy-aware by design: nothing the user said or
+  a tool returned is recorded or logged.
 * Phase 9 (Mnemo) — deferred (Mnemo is not yet complete).
-
-Multimodal note: image input is verified end-to-end against the E2B
-checkpoint (vision executor on CPU; `gemma-model-understands-images` and the
-`gemma-example` confirm the model sees images). Audio input is accepted and
-flows through the same path, but the current checkpoint has no audio channel
-and declines gracefully; a future audio-capable checkpoint or LoRA should
-answer directly.
 
 ⸻
 

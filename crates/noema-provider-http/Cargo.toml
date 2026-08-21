@@ -1,0 +1,18 @@
+[package]
+name = "noema-provider-http"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "OpenAI-compatible HTTP model provider for Noema cloud escalation."
+
+[dependencies]
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+noema-core = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }

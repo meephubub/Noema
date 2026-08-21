@@ -25,6 +25,7 @@ pub mod config;
 pub mod error;
 pub mod escalation;
 pub mod logging;
+pub mod metrics;
 pub mod model;
 pub mod router;
 pub mod runtime;
@@ -38,6 +39,9 @@ pub use noema_approval::{
     ApprovalDecision, ApprovalId, ApprovalPolicy, ApprovalRequest, ApprovalStatus,
 };
 pub use escalation::{EscalationDecision, EscalationPolicy};
+pub use metrics::{
+    EscalationMetrics, MetricsSnapshot, ModelMetrics, ToolMetrics,
+};
 pub use model::{
     AudioData, ContentPart, EscalationRequest, ImageData, Message, Model, ModelChunk,
     ModelOptions, ModelProvider, ModelRequest, ModelResponse, Role, Usage,

@@ -68,6 +68,34 @@ pub enum Event {
     ModelDelta { session_id: SessionId, delta: String },
     /// A model finished generating.
     ModelCompleted { session_id: SessionId },
+    /// Per-turn model observability: latency and token usage.
+    ///
+    /// Usage is `None` when the backend does not report it for the turn
+    /// (streamed turns often lack usage through the response).
+    ModelMetrics {
+        session_id: SessionId,
+        model: String,
+        latency_ms: u64,
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+    },
+    /// Per-call tool observability: latency and success.
+    ToolMetrics {
+        session_id: SessionId,
+        tool: String,
+        latency_ms: u64,
+        success: bool,
+    },
+    /// Per-escalation observability.
+    ///
+    /// `provider` is `None` for local escalations and `latency_ms` is
+    /// `None` when no provider ran (local escalations measure no remote
+    /// call).
+    EscalationMetrics {
+        session_id: SessionId,
+        provider: Option<String>,
+        latency_ms: Option<u64>,
+    },
     /// Gemma issued a semantic tool request.
     ToolRequested { session_id: SessionId },
     /// A tool request was formatted into a structured call by Needle.
@@ -118,6 +146,9 @@ impl Event {
             Event::ModelStarted { session_id, .. } => session_id,
             Event::ModelDelta { session_id, .. } => session_id,
             Event::ModelCompleted { session_id } => session_id,
+            Event::ModelMetrics { session_id, .. } => session_id,
+            Event::ToolMetrics { session_id, .. } => session_id,
+            Event::EscalationMetrics { session_id, .. } => session_id,
             Event::ToolRequested { session_id } => session_id,
             Event::ToolFormatted { session_id } => session_id,
             Event::ToolApprovalRequired { session_id } => session_id,
