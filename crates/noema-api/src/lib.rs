@@ -42,26 +42,72 @@
 //! # }
 //! ```
 //!
-//! Later milestones add tool wiring, the approval API, and escalation.
+//! Phase 8 surfaces human approval: `session.pending_approvals()` returns
+//! the proposals awaiting a decision, and `session.approve_tool(id)` /
+//! `session.reject_tool(id)` answer them. The tool vocabulary (`ToolCall`,
+//! `ToolResult`, `ToolRegistry`, …) is re-exported so the frontend can drive
+//! `session.format_tool` / `session.execute_tool` without reaching into
+//! `noema-tools`.
+//!
+//! ```
+//! use noema_api::prelude::*;
+//!
+//! # async fn example() -> noema_api::Result<()> {
+//! # #[derive(Debug)]
+//! # struct Mock;
+//! # #[async_trait::async_trait]
+//! # impl Model for Mock {
+//! #     fn id(&self) -> &str { "mock" }
+//! #     async fn generate(
+//! #         &self,
+//! #         _r: ModelRequest,
+//! #         _c: tokio_util::sync::CancellationToken,
+//! #     ) -> Result<ModelResponse> {
+//! #         Ok(ModelResponse::Text { content: "hi".into(), usage: None })
+//! #     }
+//! # }
+//! # init_logging(LogLevel::Info)?;
+//! # let noema = Noema::builder().with_model(Mock).build().await?;
+//! let session = noema.create_session().await?;
+//!
+//! // A risky tool call pauses for approval; the frontend answers by id.
+//! for pending in session.pending_approvals() {
+//!     session.approve_tool(pending.id.clone())?;
+//! }
+//!
+//! session.close().await?;
+//! # Ok(())
+//! # }
+//! ```
 
 /// Convenience re-exports of the public API.
 pub mod prelude {
     pub use noema_core::{
-        init_logging, AudioData, ContentPart, EscalationRequest, ImageData, LogLevel, Message,
+        init_logging, ApprovalDecision, ApprovalId, ApprovalPolicy, ApprovalRequest,
+        ApprovalStatus, AudioData, ContentPart, EscalationRequest, ImageData, LogLevel, Message,
         Model, ModelChunk, ModelOptions, ModelProvider, ModelRequest, ModelResponse, Noema,
         NoemaBuilder, NoemaConfig, NoemaError, Result, Role, Route, RoutedAction, Router,
-        SendOutcome, Session, SessionState, Usage,
+        SendOutcome, Session, SessionState, ToolFormatter, Usage,
     };
     pub use noema_events::{Event, EventBus, EventStream, SessionId};
+    pub use noema_tools::{
+        NoemaTool, RiskLevel, ToolCall, ToolMetadata, ToolRegistry, ToolResult, ToolSchema,
+        ToolSummary,
+    };
 }
 
 pub use noema_core::{
-    init_logging, AudioData, ContentPart, EscalationRequest, ImageData, LogLevel, Message, Model,
-    ModelChunk, ModelOptions, ModelProvider, ModelRequest, ModelResponse, Noema, NoemaBuilder,
-    NoemaConfig, NoemaError, Result, Role, Route, RoutedAction, Router, SendOutcome, Session,
-    SessionState, Usage,
+    init_logging, ApprovalDecision, ApprovalId, ApprovalPolicy, ApprovalRequest, ApprovalStatus,
+    AudioData, ContentPart, EscalationRequest, ImageData, LogLevel, Message, Model, ModelChunk,
+    ModelOptions, ModelProvider, ModelRequest, ModelResponse, Noema, NoemaBuilder, NoemaConfig,
+    NoemaError, Result, Role, Route, RoutedAction, Router, SendOutcome, Session, SessionState,
+    ToolFormatter, Usage,
 };
 pub use noema_events::{Event, EventBus, EventStream, SessionId};
+pub use noema_tools::{
+    NoemaTool, RiskLevel, ToolCall, ToolMetadata, ToolRegistry, ToolResult, ToolSchema,
+    ToolSummary,
+};
 
 #[cfg(test)]
 mod tests {

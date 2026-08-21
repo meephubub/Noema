@@ -6,16 +6,15 @@
 //!
 //! # Conversation state
 //!
-//! The `Model` trait is session-agnostic (requests carry messages but no
-//! session id), and LiteRT-LM's *streaming* conversation path does not commit
-//! the assistant turn into the native conversation — so relying on native
-//! state would lose multi-turn memory (verified empirically). `GemmaModel`
-//! instead keeps the conversation history in Rust and seeds a fresh native
-//! conversation from it each turn (the engine's `messages` preface), which
-//! preserves memory and makes each turn self-contained. Multiple sessions
-//! sharing one `GemmaModel` would still interleave in this single history;
-//! session-keyed context assembly (the context milestone) will key history
-//! per session.
+//! LiteRT-LM's *streaming* conversation path does not commit the assistant
+//! turn into the native conversation, so relying on native state would lose
+//! multi-turn memory (verified empirically). `GemmaModel` is therefore
+//! **request-driven**: each request carries the full conversation, and the
+//! adapter seeds a fresh native conversation from `request.messages` (all
+//! but the last as the engine's `messages` preface, the last as the current
+//! turn). This preserves memory, keeps every turn self-contained, and lets
+//! the session — not the model — own the conversation, which is what makes
+//! the agent loop (tool results fed back to the model) possible.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -40,13 +39,9 @@ pub const DEFAULT_MODEL_FILE: &str = "gemma-4-E2B-it.litertlm";
 pub struct GemmaModel {
     id: String,
     options: GemmaOptions,
-    /// The conversation history (user and assistant turns), kept in Rust so
-    /// multi-turn memory survives the streaming path. Replayed as the native
-    /// conversation preface each turn.
-    history: Arc<Mutex<Vec<Message>>>,
     /// Serialises whole turns so concurrent `generate` calls never interleave
-    /// on the history. The guard is moved into the draining task and released
-    /// only after the turn has been committed to history.
+    /// on the native engine. The guard is moved into the draining task and
+    /// released only after the stream has fully ended.
     turn_lock: Arc<tokio::sync::Mutex<()>>,
     /// The usage of the most recently completed turn, when benchmarking is
     /// enabled.
@@ -62,10 +57,6 @@ impl fmt::Debug for GemmaModel {
         f.debug_struct("GemmaModel")
             .field("id", &self.id)
             .field("options", &self.options)
-            .field(
-                "history_turns",
-                &self.history.lock().map(|h| h.len()).unwrap_or(0),
-            )
             .field("last_usage", &self.last_usage.lock().unwrap())
             .finish_non_exhaustive()
     }
@@ -176,11 +167,14 @@ impl GemmaModel {
         *self.last_usage.lock().expect("usage lock poisoned")
     }
 
-    /// Clears the conversation history, rewinding context while keeping the
+    /// Clears the per-turn state, rewinding context while keeping the
     /// loaded weights.
+    ///
+    /// The model is request-driven (each request carries its own history),
+    /// so this only resets the reported usage; conversation context lives in
+    /// the session.
     pub async fn reset_conversation(&self) -> Result<()> {
         let _turn = self.turn_lock.clone().lock_owned().await;
-        self.history.lock().expect("history poisoned").clear();
         *self.last_usage.lock().expect("usage lock poisoned") = None;
         Ok(())
     }
@@ -208,7 +202,7 @@ impl GemmaModel {
     /// the history, and the current message. (The native conversation's
     /// `token_count` is 0 before the first send, so it cannot be used on a
     /// freshly seeded conversation.)
-    fn input_tokens(&self, history: &[Message], current: &Message) -> u64 {
+    fn input_tokens(&self, history: &[noema_core::Message], current: &noema_core::Message) -> u64 {
         let mut tokens = 0u64;
         if let Some(system) = &self.options.system_prompt {
             if let Ok(t) = self.engine.tokenize(system) {
@@ -216,7 +210,7 @@ impl GemmaModel {
             }
         }
         for message in history.iter().chain(std::iter::once(current)) {
-            if let Some(text) = message.text() {
+            if let Some(text) = message_text(message) {
                 if let Ok(t) = self.engine.tokenize(&text) {
                     tokens += t.len() as u64;
                 }
@@ -228,7 +222,18 @@ impl GemmaModel {
     /// Creates a fresh native conversation seeded with the given history as
     /// the engine's `messages` preface, so the streamed turn sees prior
     /// context without relying on native conversation state.
-    fn seeded_conversation(&self, history: &[Message]) -> Result<Conversation<'static>> {
+    ///
+    /// A request-level system prompt overrides the adapter-level one, so the
+    /// session (which owns the conversation) can drive the system turn per
+    /// request — e.g. the dynamic tool summaries.
+    fn seeded_conversation(
+        &self,
+        history: &[Message],
+        request_system: Option<&str>,
+    ) -> Result<Conversation<'static>> {
+        let system = request_system
+            .map(str::to_owned)
+            .or_else(|| self.options.system_prompt.clone());
         let config = ConversationConfig {
             session: SessionConfig {
                 max_output_tokens: Some(self.options.max_output_tokens),
@@ -241,8 +246,8 @@ impl GemmaModel {
                 ),
                 ..Default::default()
             },
-            system_message: self.options.system_prompt.as_ref().map(|system| {
-                serde_json::to_value(Message::system(system)).expect("system message serializes")
+            system_message: system.map(|system| {
+                serde_json::to_value(Message::system(&system)).expect("system message serializes")
             }),
             messages: (!history.is_empty())
                 .then(|| serde_json::to_value(history).expect("history serializes")),
@@ -269,17 +274,31 @@ impl Model for GemmaModel {
         request: ModelRequest,
         cancel: CancellationToken,
     ) -> Result<ModelResponse> {
+        // The request carries the conversation: the last message is the
+        // current turn, everything before it is the history to replay.
+        let history = history_of(&request)?;
+        let current = request
+            .messages
+            .last()
+            .cloned()
+            .expect("history_of verified a non-empty request");
         let (message, send_options) = self.message_for(&request)?;
 
-        // Serialise turns and hold the guard until the turn is committed:
-        // it is moved into the draining task below, so a later `generate`
-        // never starts while a previous turn is still streaming or writing
-        // history.
+        // Serialise turns: the guard is moved into the draining task below
+        // and released only once the native stream has fully ended, so a
+        // later `generate` can never start while a previous turn is still
+        // streaming.
         let turn_guard = self.turn_lock.clone().lock_owned().await;
 
-        let history = self.history.lock().expect("history poisoned").clone();
-        let mut conversation = self.seeded_conversation(&history)?;
-        let input_tokens = self.input_tokens(&history, &message);
+        // Replay the request history as the native conversation preface
+        // (the current message is handled by `message_for`).
+        let native_history = history
+            .iter()
+            .map(map_message)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut conversation =
+            self.seeded_conversation(&native_history, request.system.as_deref())?;
+        let input_tokens = self.input_tokens(&history, &current);
 
         let receiver = SendReceiver(
             conversation
@@ -290,7 +309,6 @@ impl Model for GemmaModel {
         let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<ModelChunk, NoemaError>>(16);
 
         let engine = Arc::clone(&self.engine);
-        let history_slot = Arc::clone(&self.history);
         let usage_slot = Arc::clone(&self.last_usage);
 
         // The native receiver is a blocking std channel; drain it on a
@@ -299,33 +317,52 @@ impl Model for GemmaModel {
             let (full, cancelled) = receiver.drain(&mut conversation, &cancel, &tx);
 
             if !cancelled && !full.is_empty() {
-                // Commit the turn: user message + assistant reply.
-                if let Ok(mut history) = history_slot.lock() {
-                    history.push(message);
-                    history.push(Message::model(full.trim_end()));
-                    let output_tokens = engine
-                        .tokenize(&full)
-                        .ok()
-                        .map(|tokens| tokens.len() as u64)
-                        .unwrap_or(0);
-                    let usage = Usage {
-                        input_tokens,
-                        output_tokens,
-                    };
-                    if let Ok(mut slot) = usage_slot.lock() {
-                        *slot = Some(usage);
-                    }
+                let output_tokens = engine
+                    .tokenize(&full)
+                    .ok()
+                    .map(|tokens| tokens.len() as u64)
+                    .unwrap_or(0);
+                let usage = Usage {
+                    input_tokens,
+                    output_tokens,
+                };
+                if let Ok(mut slot) = usage_slot.lock() {
+                    *slot = Some(usage);
                 }
             }
 
-            // Dropping `turn_guard` here (after history is written) lets the
-            // next turn start.
+            // Dropping `turn_guard` here (after the stream fully ended) lets
+            // the next turn start.
             drop(turn_guard);
         });
 
         let stream = ReceiverStream::new(rx);
         Ok(ModelResponse::Stream(Box::pin(stream)))
     }
+}
+
+/// The replayable history of a request: every message except the last (the
+/// last is the current turn).
+fn history_of(request: &ModelRequest) -> Result<Vec<noema_core::Message>> {
+    if request.messages.is_empty() {
+        return Err(NoemaError::Model("Gemma request carried no messages".into()));
+    }
+    Ok(request.messages[..request.messages.len() - 1].to_vec())
+}
+
+/// The concatenated text of a message's text parts (for token estimation;
+/// multimodal parts are ignored).
+fn message_text(message: &noema_core::Message) -> Option<String> {
+    let text: String = message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            noema_core::ContentPart::Text(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!text.is_empty()).then_some(text)
 }
 
 /// Resolves the Gemma model file from `NOEMA_GEMMA_MODEL` or the workspace
@@ -440,7 +477,6 @@ impl GemmaModelBuilder {
         Ok(GemmaModel {
             id: self.options.id.clone(),
             options: self.options,
-            history: Arc::new(Mutex::new(Vec::new())),
             turn_lock: Arc::new(tokio::sync::Mutex::new(())),
             last_usage: Arc::new(Mutex::new(None)),
             engine,

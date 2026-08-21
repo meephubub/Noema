@@ -1,16 +1,16 @@
 [package]
-name = "noema-api"
+name = "agent-example"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Public frontend-facing Rust API for Noema."
+publish = false
 
 [dependencies]
 noema-core = { workspace = true }
 noema-events = { workspace = true }
+noema-filesearch = { workspace = true }
+noema-gemma = { workspace = true }
+noema-router = { workspace = true }
 noema-tools = { workspace = true }
-
-[dev-dependencies]
-async-trait = { workspace = true }
-tokio-util = { workspace = true }
+tokio = { workspace = true }

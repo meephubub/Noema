@@ -246,7 +246,7 @@ The result is an agent architecture that keeps expensive reasoning focused on th
 
 Status
 
-Noema is under active development. Phases 1–8 of the plan are implemented:
+Noema is under active development. Phases 1–8 and 10 of the plan are implemented (Phase 9, Mnemo, is deferred until Mnemo itself is ready):
 
 * Phase 1 — workspace foundation, core crates, sessions, events.
 * Phase 2 — model abstractions: messages, multimodal content parts, streaming
@@ -274,8 +274,15 @@ Noema is under active development. Phases 1–8 of the plan are implemented:
 * Phase 8 — human approval (`crates/noema-approval`): risk-gated execution
   with `ToolApprovalRequired` events, `session.approve_tool`/`reject_tool`,
   and timeouts. `examples/approval` shows approve, reject, and expire paths.
+* Phase 10 — the full agent loop inside `session.send`: model turn → tool
+  intent → Needle formatting → risk/approval → execution → result fed back,
+  bounded by iteration/tool-call limits, with the dynamic Gemma tool
+  summaries injected as the system prompt. Sessions own the conversation,
+  so multi-turn memory works for any model. `examples/agent` runs it against
+  the real engines.
 * Rig integration (`crates/noema-rig`) — any Noema model drives rig agents
-  through a `CompletionModel` adapter.
+  through a `CompletionModel` adapter (full chat history forwarded by
+  default).
 
 Running locally:
 
@@ -297,6 +304,9 @@ cargo run -p filesearch-example
 
 # Human approval: risky tool calls pause for approve / reject / expire
 cargo run -p approval-example
+
+# Full agent loop: model → tool → result → answer inside one session.send
+cargo run -p agent-example
 ```
 
 Both engines are local: Gemma runs on CPU via LiteRT-LM, Needle is a
@@ -341,7 +351,8 @@ noema/
 │   ├── router/              # Needle routes actions, Gemma handles the rest
 │   ├── tools/               # register tools, Needle formats, Noema executes
 │   ├── filesearch/          # Gemma → Needle format → filesystem → Gemma
-│   └── approval/            # approve / reject / expire risky tool calls
+│   ├── approval/            # approve / reject / expire risky tool calls
+│   └── agent/               # the full agent loop inside session.send
 ├── prebuilt/                # native engines (Needle 2, LiteRT-LM DLLs)
 ├── models/                  # Gemma 4 model file (gitignored)
 ├── tests/

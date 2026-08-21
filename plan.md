@@ -2012,7 +2012,22 @@ Implementation status:
   `approve_tool`/`reject_tool` answer pending requests; undecided requests
   expire and are removed. `examples/approval` demonstrates approve, reject,
   and expire paths with a simulated destructive tool.
-* Phase 9 (Mnemo) and later — not yet started.
+* Phase 10 (Full Agent Loop) — done. `Session::send` now runs the whole
+  loop: the session owns the conversation (models are request-driven —
+  `GemmaModel` seeds each turn from `request.messages`, and the rig adapter
+  forwards full history by default), and `send` iterates model turn → tool
+  intent detection (a reply naming a registered tool or its crate's short
+  name) → `ToolRequested` → per-tool Needle formatting (`ToolFormatted`) →
+  risk gate / approval → `ToolStarted`/`ToolCompleted` → result fed back as
+  a `Role::Tool` message → next turn, bounded by
+  `LimitsConfig::max_agent_iterations` and `max_tool_calls`. The dynamic
+  Gemma tool summaries are injected as the request system prompt inside the
+  loop. Failure recovery: when formatting fails (e.g. the model named a tool
+  while declining), the model's reply becomes the final answer with an
+  `Error` event rather than aborting the send; rejected approvals and tool
+  failures abort. Multi-turn memory now works at the session level for any
+  model. `examples/agent` runs the loop against the real engines.
+* Phase 9 (Mnemo) — deferred (Mnemo is not yet complete).
 
 Multimodal note: image input is verified end-to-end against the E2B
 checkpoint (vision executor on CPU; `gemma-model-understands-images` and the

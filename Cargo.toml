@@ -22,6 +22,7 @@ members = [
     "examples/tools",
     "examples/filesearch",
     "examples/approval",
+    "examples/agent",
     "tests/integration",
 ]
 

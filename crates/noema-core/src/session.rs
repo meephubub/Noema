@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
+use crate::config::LimitsConfig;
 use crate::error::{NoemaError, Result};
 use crate::escalation::{EscalationDecision, EscalationPolicy};
 use crate::model::{ContentPart, EscalationRequest, Message, Model, ModelRequest, ModelResponse, Role};
@@ -45,6 +46,12 @@ pub struct Session {
     approval_policy: Arc<ApprovalPolicy>,
     approvals: Arc<ApprovalStore>,
     escalation: Arc<EscalationPolicy>,
+    /// The session-owned conversation. The model is request-driven: each
+    /// turn receives the full transcript, so the session (not the model)
+    /// keeps ephemeral conversation state.
+    history: Arc<Mutex<Vec<Message>>>,
+    /// Resource limits that prevent runaway agent loops.
+    limits: LimitsConfig,
     current_op: Arc<Mutex<Option<CancellationToken>>>,
 }
 
@@ -61,6 +68,7 @@ impl Session {
         approval_policy: Arc<ApprovalPolicy>,
         approvals: Arc<ApprovalStore>,
         escalation: Arc<EscalationPolicy>,
+        limits: LimitsConfig,
     ) -> Self {
         Self {
             id,
@@ -75,6 +83,8 @@ impl Session {
             approval_policy,
             approvals,
             escalation,
+            history: Arc::new(Mutex::new(Vec::new())),
+            limits,
             current_op: Arc::new(Mutex::new(None)),
         }
     }
@@ -301,11 +311,26 @@ impl Session {
     /// ([`Event::RoutingEscalated`]) and the outcome is
     /// [`SendOutcome::Model`].
     ///
-    /// Model turns are streamed through the event bus:
-    /// [`Event::UserMessageReceived`], [`Event::ModelStarted`],
-    /// [`Event::ModelDelta`] (per chunk), and [`Event::ModelCompleted`] are
-    /// published as the model works. Streaming responses are drained into a
-    /// complete [`ModelResponse::Text`] before returning.
+    /// # Agent loop
+    ///
+    /// The session owns the conversation (the model is request-driven), and
+    /// `send` runs the full agent loop up to [`LimitsConfig::max_agent_iterations`]:
+    ///
+    /// ```text
+    /// user message
+    ///     ↓
+    /// model turn (streamed: ModelStarted / ModelDelta / ModelCompleted)
+    ///     ├── reply names a registered tool → ToolRequested → format
+    ///     │     (ToolFormatted) → risk gate / approval → ToolStarted →
+    ///     │     ToolCompleted → result fed back → next model turn
+    ///     └── no tool mentioned → the reply is the final answer
+    /// ```
+    ///
+    /// Tool-intent detection is deliberately simple: a reply naming a
+    /// registered tool (or its crate's short name) is treated as a semantic
+    /// tool request. If formatting fails, the model's reply is returned as
+    /// the final answer (with an [`Event::Error`]) rather than failing the
+    /// whole send.
     ///
     /// Requires a model to have been registered on the runtime via
     /// [`NoemaBuilder::with_model`](crate::NoemaBuilder::with_model).
@@ -351,25 +376,184 @@ impl Session {
             RouteOutcome::Proceed => false,
         };
 
-        let request = ModelRequest::new(vec![message]);
-        self.events.publish(Event::ModelStarted {
-            session_id: self.id.clone(),
-            model: model.id().to_string(),
-        });
+        // Session-owned conversation: append the user message and run the
+        // agent loop over the accumulated transcript.
+        let mut transcript = {
+            let mut history = self.history.lock().await;
+            history.push(message);
+            history.clone()
+        };
+        let system = self.agent_system();
+        let max_iterations = self.limits.max_agent_iterations;
+        let max_tool_calls = self.limits.max_tool_calls;
 
-        let result = model.generate(request, token).await;
+        let mut iterations = 0usize;
+        let mut tool_calls = 0usize;
+        let (final_text, final_usage) = loop {
+            iterations += 1;
+            if iterations > max_iterations {
+                *self.current_op.lock().await = None;
+                return Err(NoemaError::Session(format!(
+                    "agent loop exceeded the iteration limit of {max_iterations}"
+                )));
+            }
 
-        // The operation is over (success, error, or cancellation).
+            self.events.publish(Event::ModelStarted {
+                session_id: self.id.clone(),
+                model: model.id().to_string(),
+            });
+            let mut request = ModelRequest::new(transcript.clone());
+            if let Some(system) = &system {
+                request = request.with_system(system.clone());
+            }
+            let result = model.generate(request, token.clone()).await;
+            let response = self.finish_response(result?).await?;
+            let (text, usage) = match response {
+                ModelResponse::Text { content, usage } => (content, usage),
+                ModelResponse::Escalate(request) => {
+                    *self.current_op.lock().await = None;
+                    if escalated {
+                        self.events.publish(Event::EscalationCompleted {
+                            session_id: self.id.clone(),
+                        });
+                    }
+                    return Ok(SendOutcome::Model(ModelResponse::Escalate(request)));
+                }
+                ModelResponse::Stream(_) => unreachable!("finish_response drains streams"),
+            };
+
+            let tool_name = match self.tool_intent(&text) {
+                Some(name) => name,
+                // No tool mentioned: this reply is the final answer.
+                None => break (text, usage),
+            };
+
+            tool_calls += 1;
+            if tool_calls > max_tool_calls {
+                *self.current_op.lock().await = None;
+                return Err(NoemaError::Session(format!(
+                    "agent loop exceeded the tool-call limit of {max_tool_calls}"
+                )));
+            }
+
+            self.events.publish(Event::ToolRequested {
+                session_id: self.id.clone(),
+            });
+            let schema = self
+                .tools
+                .as_ref()
+                .expect("tool_intent only fires for registered tools")
+                .get(&tool_name)
+                .expect("tool_intent found the tool")
+                .schema();
+            let call = match self.format_tool(schema, &text).await {
+                Ok(call) => call,
+                Err(error) => {
+                    // The model named a tool the formatter cannot serve
+                    // (e.g. it mentioned the tool while declining): treat the
+                    // reply as the final answer.
+                    tracing::warn!(tool = %tool_name, error = %error, "tool formatting failed; using the model's reply");
+                    self.events.publish(Event::Error {
+                        session_id: self.id.clone(),
+                        error: error.to_string(),
+                    });
+                    break (text, usage);
+                }
+            };
+            self.events.publish(Event::ToolFormatted {
+                session_id: self.id.clone(),
+            });
+
+            // Risk gate + approval + execution (streams ToolStarted /
+            // ToolCompleted / ToolFailed). A rejected approval or a tool
+            // failure aborts the send.
+            let result = match self.execute_tool(call).await {
+                Ok(result) => result,
+                Err(error) => {
+                    *self.current_op.lock().await = None;
+                    if escalated {
+                        self.events.publish(Event::EscalationCompleted {
+                            session_id: self.id.clone(),
+                        });
+                    }
+                    return Err(error);
+                }
+            };
+
+            // Feed the result back and continue the loop.
+            transcript.push(Message::text(Role::Assistant, text));
+            transcript.push(Message::text(Role::Tool, tool_result_text(&result)));
+        };
+
+        // Commit the whole turn (user message + any tool steps + the final
+        // assistant reply) to the session-owned conversation, then finish.
+        transcript.push(Message::text(Role::Assistant, final_text.clone()));
+        {
+            let mut history = self.history.lock().await;
+            *history = transcript;
+        }
         *self.current_op.lock().await = None;
-
-        let response = result?;
-        let response = self.finish_response(response).await?;
         if escalated {
             self.events.publish(Event::EscalationCompleted {
                 session_id: self.id.clone(),
             });
         }
-        Ok(SendOutcome::Model(response))
+        Ok(SendOutcome::Model(ModelResponse::Text {
+            content: final_text,
+            usage: final_usage,
+        }))
+    }
+
+    /// Builds the agent system prompt: the dynamic Gemma tool summaries plus
+    /// a short tool-dispatch instruction, when tools are registered.
+    ///
+    /// Request-level system prompts override a model's configured one, so
+    /// this is what Gemma sees inside the loop. Returns `None` (no override)
+    /// when no tools are registered.
+    fn agent_system(&self) -> Option<String> {
+        let section = self.tools.as_ref()?.gemma_tool_section();
+        if section.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "You are Noema, an agent that can run tools.\n\
+             {section}\
+             When the user asks for something a tool can do, reply with a \
+             single short sentence describing the tool call you want to make, \
+             naming the exact tool. Never produce the final schema and never \
+             run tools yourself."
+        ))
+    }
+
+    /// Detects a semantic tool request in a model reply.
+    ///
+    /// A reply is treated as a tool request when it names a registered tool
+    /// (or the short name of its crate, e.g. `filesearch` for
+    /// `noema-filesearch`) as a whole word. The longest matching name wins,
+    /// so more specific tools beat generic ones.
+    fn tool_intent(&self, text: &str) -> Option<String> {
+        let tools = self.tools.as_ref()?;
+        let tokens: Vec<String> = text
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .filter(|token| !token.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let mut candidates: Vec<(usize, String)> = Vec::new();
+        for tool in tools.iter() {
+            let metadata = tool.metadata();
+            let name = metadata.name.to_lowercase();
+            let mut needles = vec![name];
+            needles.extend(metadata.crate_name.to_lowercase().split('-').map(str::to_owned));
+            if needles
+                .iter()
+                .any(|needle| tokens.iter().any(|token| token == needle))
+            {
+                candidates.push((needles[0].len(), metadata.name.clone()));
+            }
+        }
+        candidates.sort_by_key(|(len, _)| std::cmp::Reverse(*len));
+        candidates.into_iter().next().map(|(_, name)| name)
     }
 
     /// Applies the escalation policy to a router escalation and, when the
@@ -543,6 +727,15 @@ fn plain_user_text(message: &Message) -> Option<String> {
     }
 }
 
+/// A stable text form of a tool result for the reasoning model.
+fn tool_result_text(result: &ToolResult) -> String {
+    if result.success {
+        format!("Tool result: {}", result.text)
+    } else {
+        format!("Tool failed: {}", result.text)
+    }
+}
+
 /// The outcome of offering a message to the router.
 enum RouteOutcome {
     /// The router handled the request; return the outcome directly.
@@ -615,6 +808,7 @@ mod tests {
             Arc::new(ApprovalPolicy::default()),
             Arc::new(ApprovalStore::new()),
             escalation,
+            LimitsConfig::default(),
         )
     }
 
@@ -635,6 +829,7 @@ mod tests {
             Arc::new(ApprovalPolicy::default()),
             Arc::new(ApprovalStore::new()),
             Arc::new(EscalationPolicy::default()),
+            LimitsConfig::default(),
         )
     }
 
@@ -655,6 +850,30 @@ mod tests {
             Arc::new(policy),
             Arc::new(ApprovalStore::new()),
             Arc::new(EscalationPolicy::default()),
+            LimitsConfig::default(),
+        )
+    }
+
+    /// A session with custom loop limits, for agent-loop tests.
+    fn test_session_with_limits(
+        model: Option<Arc<dyn Model>>,
+        tools: ToolRegistry,
+        formatter: Option<Arc<dyn ToolFormatter>>,
+        limits: LimitsConfig,
+    ) -> Session {
+        Session::new(
+            SessionId::generate(),
+            EventBus::default(),
+            Arc::new(Mutex::new(SessionState::Active)),
+            model,
+            None,
+            Some(Arc::new(tools)),
+            formatter,
+            HashMap::new(),
+            Arc::new(ApprovalPolicy::default()),
+            Arc::new(ApprovalStore::new()),
+            Arc::new(EscalationPolicy::default()),
+            limits,
         )
     }
 
@@ -685,6 +904,7 @@ mod tests {
             Arc::new(ApprovalPolicy::default()),
             Arc::new(ApprovalStore::new()),
             Arc::new(EscalationPolicy::default()),
+            LimitsConfig::default(),
         );
 
         let mut events = bus.subscribe(id.clone());
@@ -1247,6 +1467,7 @@ mod tests {
             Arc::new(ApprovalPolicy::default()),
             Arc::new(ApprovalStore::new()),
             Arc::new(EscalationPolicy::default()),
+            LimitsConfig::default(),
         );
         let mut events = bus.subscribe(id.clone());
 
@@ -1413,5 +1634,242 @@ mod tests {
             .approve_tool(ApprovalId::generate())
             .expect_err("unknown");
         assert!(matches!(err, NoemaError::Approval(_)));
+    }
+
+    /// A model that replays a scripted list of replies and records every
+    /// request's message texts, for agent-loop tests.
+    #[derive(Debug)]
+    struct ScriptedModel {
+        replies: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+        seen: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    }
+
+    impl ScriptedModel {
+        fn new(replies: Vec<&str>) -> Self {
+            Self {
+                replies: Arc::new(std::sync::Mutex::new(
+                    replies.into_iter().map(str::to_owned).collect(),
+                )),
+                seen: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+
+        fn seen(&self) -> Vec<Vec<String>> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Model for ScriptedModel {
+        fn id(&self) -> &str {
+            "scripted"
+        }
+
+        async fn generate(
+            &self,
+            request: ModelRequest,
+            _cancel: CancellationToken,
+        ) -> Result<ModelResponse> {
+            let texts: Vec<String> = request
+                .messages
+                .iter()
+                .map(|message| {
+                    message
+                        .content
+                        .iter()
+                        .filter_map(|part| match part {
+                            ContentPart::Text(text) => Some(text.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .collect();
+            self.seen.lock().unwrap().push(texts);
+            let reply = self
+                .replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| "no more replies".into());
+            Ok(ModelResponse::Text {
+                content: reply,
+                usage: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_loop_runs_a_tool_then_returns_the_final_answer() {
+        let model = Arc::new(ScriptedModel::new(vec![
+            "I will use the echo tool to greet you.",
+            "Found the file at /tmp/notes.txt.",
+        ]));
+        let (registry, runs) = recording_registry("echo", RiskLevel::Low);
+        let session = test_session_with_limits(
+            Some(model.clone()),
+            registry,
+            Some(Arc::new(FixedFormatter(ToolCall::new("echo")))),
+            LimitsConfig::default(),
+        );
+        let mut events = session.events();
+
+        let outcome = session
+            .send(Message::text(Role::User, "find my notes"))
+            .await
+            .expect("send");
+        let response = outcome.into_model().expect("model outcome");
+        match response {
+            ModelResponse::Text { content, .. } => {
+                assert_eq!(content, "Found the file at /tmp/notes.txt.")
+            }
+            other => panic!("expected the final answer, got {other:?}"),
+        }
+
+        // The tool ran exactly once, and the second model call saw the tool
+        // result fed back into the transcript.
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let seen = model.seen();
+        assert_eq!(seen.len(), 2, "one tool turn then the final answer");
+        let second_call = &seen[1];
+        assert!(
+            second_call.iter().any(|text| text.contains("Tool result:")),
+            "the tool result must be fed back, got {second_call:?}"
+        );
+
+        // The tool events were streamed (skipping the model-turn events
+        // that come before them).
+        let mut saw_tool_requested = false;
+        while let Some(event) = events.next().await {
+            if matches!(event, Event::ToolRequested { .. }) {
+                saw_tool_requested = true;
+                break;
+            }
+        }
+        assert!(saw_tool_requested, "ToolRequested was not emitted");
+        assert!(matches!(events.next().await, Some(Event::ToolFormatted { .. })));
+        assert!(matches!(events.next().await, Some(Event::ToolStarted { .. })));
+        assert!(matches!(events.next().await, Some(Event::ToolCompleted { .. })));
+    }
+
+    #[tokio::test]
+    async fn agent_loop_returns_plain_answers_without_tools() {
+        let model = Arc::new(ScriptedModel::new(vec!["hello there"]));
+        let (registry, runs) = recording_registry("echo", RiskLevel::Low);
+        let session = test_session_with_limits(
+            Some(model.clone()),
+            registry,
+            Some(Arc::new(FixedFormatter(ToolCall::new("echo")))),
+            LimitsConfig::default(),
+        );
+        let mut events = session.events();
+
+        let outcome = session
+            .send(Message::text(Role::User, "hi"))
+            .await
+            .expect("send");
+        let content = model_text(outcome.into_model().expect("model"));
+        assert_eq!(content, "hello there");
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0, "no tool ran");
+        assert_eq!(model.seen().len(), 1, "one model call");
+        while let Some(event) = events.next().await {
+            if matches!(event, Event::ModelCompleted { .. }) {
+                break;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_loop_stops_at_the_iteration_limit() {
+        let model = Arc::new(ScriptedModel::new(vec![
+            "use the echo tool",
+            "use the echo tool",
+            "use the echo tool",
+        ]));
+        let (registry, _) = recording_registry("echo", RiskLevel::Low);
+        let limits = LimitsConfig {
+            max_agent_iterations: 2,
+            ..LimitsConfig::default()
+        };
+        let session = test_session_with_limits(
+            Some(model.clone()),
+            registry,
+            Some(Arc::new(FixedFormatter(ToolCall::new("echo")))),
+            limits,
+        );
+
+        let err = session
+            .send(Message::text(Role::User, "keep going"))
+            .await
+            .expect_err("iteration limit");
+        assert!(
+            matches!(err, NoemaError::Session(_)),
+            "expected a session error, got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_loop_uses_the_model_reply_when_formatting_fails() {
+        let model = Arc::new(ScriptedModel::new(vec![
+            "I cannot help, but the echo tool would do it.",
+        ]));
+        let (registry, runs) = recording_registry("echo", RiskLevel::Low);
+        // No formatter registered: formatting fails and the reply becomes the
+        // final answer.
+        let session = test_session_with_limits(
+            Some(model.clone()),
+            registry,
+            None,
+            LimitsConfig::default(),
+        );
+        let mut events = session.events();
+
+        let outcome = session
+            .send(Message::text(Role::User, "please do it"))
+            .await
+            .expect("send");
+        let content = model_text(outcome.into_model().expect("model"));
+        assert_eq!(content, "I cannot help, but the echo tool would do it.");
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // The failure is surfaced as an Error event, not silently swallowed.
+        let mut saw_error = false;
+        while let Some(event) = events.next().await {
+            if matches!(event, Event::Error { .. }) {
+                saw_error = true;
+                break;
+            }
+        }
+        assert!(saw_error, "format failure should publish an Error event");
+    }
+
+    /// The text of a model response (panics on other shapes).
+    fn model_text(response: ModelResponse) -> String {
+        match response {
+            ModelResponse::Text { content, .. } => content,
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_send_remembers_across_turns() {
+        let model = Arc::new(ScriptedModel::new(vec!["got it", "zorp"]));
+        let session = test_session(Some(model.clone()));
+
+        session
+            .send(Message::text(Role::User, "Remember: my name is Zorp."))
+            .await
+            .expect("turn 1");
+        session
+            .send(Message::text(Role::User, "What is my name?"))
+            .await
+            .expect("turn 2");
+
+        // The second model call received the full prior conversation.
+        let seen = model.seen();
+        assert_eq!(seen.len(), 2);
+        let second = &seen[1];
+        assert!(second[0].contains("Remember: my name is Zorp."));
+        assert!(second[1].contains("got it"));
+        assert!(second[2].contains("What is my name?"));
     }
 }

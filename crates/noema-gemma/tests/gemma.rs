@@ -236,26 +236,37 @@ async fn gemma_model_streams_and_reports_usage() {
 async fn gemma_model_keeps_multi_turn_memory() {
     let model = GemmaModel::from_default().expect("model loads");
 
-    async fn turn(model: &GemmaModel, text: &str) -> String {
+    // The adapter is request-driven: each request carries the conversation,
+    // so the caller accumulates it (the session does this in real use).
+    let mut history: Vec<noema_core::Message> = Vec::new();
+
+    async fn turn(
+        model: &GemmaModel,
+        history: &mut Vec<noema_core::Message>,
+        text: &str,
+    ) -> String {
+        history.push(noema_core::Message::text(Role::User, text));
         let response = model
             .generate(
-                ModelRequest::new(vec![noema_core::Message::text(Role::User, text)]),
+                ModelRequest::new(history.clone()),
                 CancellationToken::new(),
             )
             .await
             .expect("generate");
-        match response {
+        let reply = match response {
             ModelResponse::Stream(stream) => {
                 let (text, error) = drain_model_stream(stream).await;
                 assert!(error.is_none(), "stream errored: {error:?}");
                 text
             }
             other => panic!("expected a stream, got {other:?}"),
-        }
+        };
+        history.push(noema_core::Message::text(Role::Assistant, &reply));
+        reply
     }
 
-    turn(&model, "Remember: my name is Zorp.").await;
-    let reply = turn(&model, "What is my name?").await;
+    turn(&model, &mut history, "Remember: my name is Zorp.").await;
+    let reply = turn(&model, &mut history, "What is my name?").await;
     eprintln!("follow-up reply: {reply:?}");
     assert!(
         reply.to_lowercase().contains("zorp"),

@@ -81,10 +81,11 @@ against the real engines (or degrades gracefully without them):
 | Tools | `cargo run -p tools-example` | Register tools; Gemma-facing summaries vs Needle schemas; format + execute |
 | Filesearch | `cargo run -p filesearch-example` | Phase 7 chain: Gemma semantic request → Needle format → filesystem → result → Gemma |
 | Approval | `cargo run -p approval-example` | Phase 8: risky call pauses for approve / reject / expire |
+| Agent | `cargo run -p agent-example` | Phase 10: the full agent loop inside one `session.send` |
 
-`gemma-example`, `router-example`, and `filesearch-example` load the 2.5 GB
-Gemma model and take a while to start. The other examples need only the
-Needle engine (or nothing at all).
+`gemma-example`, `router-example`, `filesearch-example`, and `agent-example`
+load the 2.5 GB Gemma model and take a while to start. The other examples
+need only the Needle engine (or nothing at all).
 
 ---
 
@@ -107,7 +108,14 @@ let noema = Noema::builder()
     .await?;
 ```
 
-### 5.2 Sessions and events
+### 5.2 Sessions, events, and conversation state
+
+Sessions own the ephemeral conversation: each `send` appends the user
+message, runs the agent loop, and commits the turn (including any tool
+steps) back into the session's history. Models are **request-driven** — every
+call carries the full transcript, so multi-turn memory works for any model
+backend, not just Gemma. (The rig adapter forwards full chat history by
+default for the same reason.)
 
 A session is an ephemeral unit of agent state (conversation, pending work).
 Sessions are created and closed on the runtime; everything a session does is
@@ -140,7 +148,34 @@ model, tools, approvals, memory, escalation, errors).
   (escalated or not routed), streamed through the bus, and drained into a
   complete `ModelResponse`.
 
-### 5.3 Models
+### 5.3 The agent loop
+
+`send` runs the full agent loop (Phase 10) automatically:
+
+```text
+user message
+    ↓
+model turn (streamed: ModelStarted / ModelDelta / ModelCompleted)
+    ├── reply names a registered tool → ToolRequested
+    │     → per-tool Needle formatter → ToolFormatted
+    │     → risk gate / approval → ToolStarted → ToolCompleted
+    │     → result fed back (Role::Tool message) → next model turn
+    └── no tool mentioned → the reply is the final answer
+```
+
+- **Tool-intent detection** is deliberately simple: a reply naming a
+  registered tool (or its crate's short name, e.g. `filesearch` for
+  `noema-filesearch`) as a whole word is treated as a semantic request.
+- The **dynamic Gemma tool summaries** are injected as the request's system
+  prompt while tools are registered, so the model knows what it can call.
+- The loop is bounded by `LimitsConfig::max_agent_iterations` (default 20)
+  and `LimitsConfig::max_tool_calls` (default 50).
+- **Failure recovery**: if the formatter cannot serve the reply (e.g. the
+  model named a tool while declining), the model's reply becomes the final
+  answer and an `Error` event is published — the send does not fail.
+  Rejected approvals and genuine tool failures abort the send.
+
+### 5.4 Models
 
 All models implement the `Model` trait in `noema-core` (text, images, audio,
 streaming, system prompts, cancellation, usage, escalation requests). Gemma
@@ -148,7 +183,7 @@ sits behind `noema-gemma`; a `Model for Arc<M>` blanket impl lets you
 register a shared handle. Any Noema model can also drive a rig agent through
 the `CompletionModel` adapter in `noema-rig`.
 
-### 5.4 Routing
+### 5.5 Routing
 
 Every plain-text user request is offered to the registered router first
 (`Router` trait). `NeedleRouter` (in `noema-router`) uses Needle 2 with the
@@ -156,7 +191,7 @@ six default Agora actions; it acts only at or above a confidence threshold
 (default 0.6) and escalates everything else to the reasoning model.
 Multimodal and non-user turns always skip routing.
 
-### 5.5 Escalation
+### 5.6 Escalation
 
 When the router escalates — or a model requests escalation — an
 `EscalationPolicy` decides what happens: escalate to the local model
@@ -165,7 +200,7 @@ policy escalates locally and never to the cloud; `offline_mode` always wins.
 Cloud escalation is the phase-11 milestone (the `ModelProvider` abstraction
 exists; no provider is wired yet).
 
-### 5.6 Tools
+### 5.7 Tools
 
 A tool is any type implementing `NoemaTool`:
 
@@ -193,7 +228,7 @@ registry.execute(call).await?;   // validated execution
 The registry keeps three views of each tool so the reasoning model's context
 stays small while Needle gets the complete schemas.
 
-### 5.7 Tool formatting (tool-specific Needle agents)
+### 5.8 Tool formatting (tool-specific Needle agents)
 
 The reasoning model never produces the final structured schema — that is the
 tool's logical Needle agent. `NeedleToolFormatter` (in `noema-router`) binds
@@ -222,7 +257,7 @@ Two engine behaviours worth knowing (verified against the real model):
   before execution anyway. A refusal (empty call list) is the engine's
   escalation signal.
 
-### 5.8 Human approval
+### 5.9 Human approval
 
 Each tool declares a `RiskLevel` (`None < Low < Medium < High < Critical`).
 The session's `ApprovalPolicy` decides when a call must pause:
@@ -249,7 +284,13 @@ Approved calls execute; rejected calls error with an approval error and
 never run; undecided calls expire after the policy timeout (the request is
 removed from the store so it can't be approved late).
 
-### 5.9 Configuration
+The approval vocabulary is re-exported through `noema-api`, so the frontend
+only ever imports that one crate: `ApprovalId`, `ApprovalRequest`,
+`ApprovalPolicy`, `ApprovalDecision`, plus the tool types
+(`ToolCall`, `ToolResult`, `ToolRegistry`, `NoemaTool`, …) for driving
+`format_tool` / `execute_tool` directly.
+
+### 5.10 Configuration
 
 `NoemaConfig` is strongly typed with sensible defaults (see
 `crates/noema-core/src/config.rs`): gemma/needle/cloud/memory/tools/risk/
@@ -326,7 +367,7 @@ crates/
   noema-native/      build helper that stages LiteRT-LM DLLs
   litert-lm-rust/    vendored Gemma 4 runtime bindings
 examples/
-  basic, gemma, needle, router, tools, filesearch, approval
+  basic, gemma, needle, router, tools, filesearch, approval, agent
 prebuilt/            native engines (Needle 2, LiteRT-LM DLLs)
 models/              Gemma model file (gitignored)
 ```

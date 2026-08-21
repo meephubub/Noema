@@ -117,6 +117,7 @@ impl Noema {
             Arc::clone(&self.approval_policy),
             Arc::clone(&self.approvals),
             Arc::clone(&self.escalation),
+            self.config.limits.clone(),
         ))
     }
 

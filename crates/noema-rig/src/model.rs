@@ -6,11 +6,11 @@
 //!
 //! # Conversation state
 //!
-//! Noema's local models own their conversation state (a `GemmaModel` holds
-//! one native LiteRT conversation, for example), so by default the adapter
-//! forwards only the latest user message of a rig chat history and lets the
-//! model keep the context. Stateless models can opt into receiving the full
-//! history via [`NoemaCompletionModel::send_full_history`].
+//! Noema's models are **request-driven**: each request carries the full
+//! conversation and the model replays it (the session owns the context, which
+//! is what makes the agent loop possible). The adapter therefore forwards
+//! the full rig chat history each turn by default. Backends that keep their
+//! own state can opt out via [`NoemaCompletionModel::send_full_history`].
 
 use std::sync::Arc;
 
@@ -36,8 +36,8 @@ pub struct NoemaCompletionModel<M: ?Sized> {
     model: Arc<M>,
     provider: String,
     /// When set, the full rig chat history is forwarded to the model each
-    /// turn (for stateless backends). Defaults to `false`: local models own
-    /// their conversation state, so only the latest user message is sent.
+    /// turn. Defaults to `true`: Noema models are request-driven, so the
+    /// conversation must come with each request.
     send_full_history: bool,
 }
 
@@ -58,7 +58,7 @@ impl<M: Model + ?Sized> NoemaCompletionModel<M> {
         Self {
             model,
             provider: "noema".to_string(),
-            send_full_history: false,
+            send_full_history: true,
         }
     }
 
@@ -70,9 +70,8 @@ impl<M: Model + ?Sized> NoemaCompletionModel<M> {
 
     /// Sets whether the full chat history is forwarded each turn.
     ///
-    /// Defaults to `false`, matching Noema's stateful local models. Enable
-    /// for stateless backends that rebuild their own context from the
-    /// history.
+    /// Defaults to `true` (Noema models are request-driven). Disable only
+    /// for backends that keep their own conversation state.
     pub fn send_full_history(mut self, enabled: bool) -> Self {
         self.send_full_history = enabled;
         self
@@ -293,13 +292,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_forwards_only_the_latest_user_message() {
+    async fn default_forwards_the_full_history() {
         let echo = Arc::new(EchoModel::new());
         let model = NoemaCompletionModel::new(Arc::clone(&echo));
         // History like rig agents build up across turns.
         let request = CompletionRequestBuilderAdapter::with_history(
             model.clone(),
             vec![
+                RigMessage::system("be brief"),
                 RigMessage::user("old prompt"),
                 RigMessage::assistant("reply"),
                 RigMessage::user("latest prompt"),
@@ -309,14 +309,14 @@ mod tests {
 
         let seen = echo.seen.lock().unwrap();
         let last = seen.last().expect("one turn");
-        assert_eq!(last.len(), 1);
-        assert_eq!(last[0], "latest prompt");
+        assert_eq!(last.len(), 4);
+        assert_eq!(last[3], "latest prompt");
     }
 
     #[tokio::test]
-    async fn full_history_mode_forwards_every_message() {
+    async fn latest_only_mode_forwards_only_the_latest() {
         let echo = Arc::new(EchoModel::new());
-        let model = NoemaCompletionModel::new(Arc::clone(&echo)).send_full_history(true);
+        let model = NoemaCompletionModel::new(Arc::clone(&echo)).send_full_history(false);
         let request = CompletionRequestBuilderAdapter::with_history(
             model.clone(),
             vec![
@@ -329,8 +329,8 @@ mod tests {
 
         let seen = echo.seen.lock().unwrap();
         let last = seen.last().expect("one turn");
-        assert_eq!(last.len(), 3);
-        assert_eq!(last[1], "first");
+        assert_eq!(last.len(), 1);
+        assert_eq!(last[0], "first");
     }
 
     /// Builds rig requests without requiring `Self: Clone` gymnastics in the
