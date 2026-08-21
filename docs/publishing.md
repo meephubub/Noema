@@ -93,9 +93,11 @@ on crates.io.
 
 ### Caveats
 
-- **Native artifacts are not uploaded.** crates.io only accepts source.
-  `noema-gemma` and `noema-needle` need their binaries at *runtime*; consumers
-  must supply `prebuilt/` (LiteRT DLLs, Needle engine) and the model files.
+- **Native binaries are auto-downloaded.** `noema-gemma` (via `litert-lm-rust`)
+  and `noema-needle` automatically download a prebuilt archive from GitHub
+  (`https://github.com/meephubub/Noema/releases/download/v1.0.0/prebuilt.zip`)
+  on first build and cache it at `~/.noema/prebuilt/`. No manual `prebuilt/`
+  setup is needed for the default case. Override with `NOEMA_PREBUILT_DIR`.
   `noema-needle-static` needs `libneedle.a` at *build time* — the symbols
   are baked into the final binary.
   Document this in the READMEs, and fail with a clear error at runtime (the

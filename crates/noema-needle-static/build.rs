@@ -16,9 +16,19 @@ fn main() {
     let platform = platform_tag();
 
     // Resolve the prebuilt directory for this platform.
-    let lib_dir = manifest
-        .join("../../prebuilt/needle")
-        .join(platform);
+    // Search order: workspace prebuilt, then shared cache ~/.noema/prebuilt/.
+    let workspace_prebuilt = manifest.join("../../prebuilt/needle").join(platform);
+    let cache_prebuilt = {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".into());
+        std::path::PathBuf::from(home).join(".noema").join("prebuilt").join("needle").join(platform)
+    };
+    let lib_dir = if workspace_prebuilt.join("needle.h").exists() {
+        workspace_prebuilt
+    } else {
+        cache_prebuilt
+    };
 
     let header = lib_dir.join("needle.h");
     let static_lib = lib_dir.join("libneedle.a");

@@ -64,11 +64,15 @@ fn main() {
     // ── Attempt download if feature enabled ────────────────────────────────
     #[cfg(feature = "download-native")]
     {
-        let prebuilt_dir = out_dir.join("prebuilt");
-        if !prebuilt_dir.exists() || !has_required_files(&prebuilt_dir) {
-            println!("cargo:warning=Native libraries not found, attempting download...");
-            if let Err(e) = download_native_libraries(&prebuilt_dir) {
-                println!("cargo:warning=Failed to download native libraries: {}", e);
+        let cache = prebuilt_cache_dir();
+        // Check if the shared cache already has the required files.
+        if !has_required_files(&cache) {
+            let local = out_dir.join("prebuilt");
+            if !has_required_files(&local) {
+                println!("cargo:warning=Native libraries not found, attempting download...");
+                if let Err(e) = download_native_libraries(&local) {
+                    println!("cargo:warning=Failed to download native libraries: {}", e);
+                }
             }
         }
     }
@@ -117,9 +121,7 @@ fn link_native_library(manifest_dir: &PathBuf, out_dir: &PathBuf) {
     let mut search_dirs: Vec<PathBuf> = [
         env::var_os("LITERT_LM_LIB_DIR").map(PathBuf::from),
         Some(out_dir.join("prebuilt")), // Downloaded libraries go here
-        // Noema addition: the workspace root keeps the native libraries in
-        // `prebuilt/` next to the Gemma model artifacts. From the vendored
-        // location `crates/litert-lm-rust/` that is `../../prebuilt`.
+        // Noema workspace: the root keeps native libraries in `prebuilt/`.
         Some(manifest_dir.join("../../prebuilt")),
         Some(manifest_dir.join("../../prebuilt/macos")),
         Some(manifest_dir.join("prebuilt")),
@@ -135,6 +137,19 @@ fn link_native_library(manifest_dir: &PathBuf, out_dir: &PathBuf) {
     let macos_subdir = manifest_dir.join("../../prebuilt/macos");
     if macos_subdir.is_dir() && !search_dirs.contains(&macos_subdir) {
         search_dirs.push(macos_subdir);
+    }
+    // Shared cache: ~/.noema/prebuilt/ (download-native feature).
+    #[cfg(feature = "download-native")]
+    {
+        let cache = prebuilt_cache_dir();
+        if cache.is_dir() && !search_dirs.contains(&cache) {
+            search_dirs.push(cache.clone());
+        }
+        // macOS dylibs may be in a `macos/` subdirectory of the cache.
+        let cache_macos = cache.join("macos");
+        if cache_macos.is_dir() && !search_dirs.contains(&cache_macos) {
+            search_dirs.push(cache_macos);
+        }
     }
     // Deduplicate.
     search_dirs.dedup();
@@ -179,20 +194,19 @@ fn link_native_library(manifest_dir: &PathBuf, out_dir: &PathBuf) {
 fn emit_link_lib(name: &str, dir: &PathBuf) {
     let is_static = env::var_os("LITERT_LM_STATIC").is_some();
 
+    // Always add the directory to the linker search path so the linker can
+    // resolve the library by name regardless of platform-specific naming
+    // conventions (.if.lib, .lib, .dll.a, etc.).
+    println!("cargo:rustc-link-search=native={}", dir.display());
+
     if cfg!(windows) && !is_static {
         // Check for the Bazel-style import library first (`litert-lm.if.lib`).
+        // MSVC linker requires the exact filename when using .if.lib, so we
+        // emit it as a raw linker argument.
         let if_lib = dir.join(format!("{name}.if.lib"));
         if if_lib.exists() {
-            // MSVC linker accepts the filename directly via the search path.
-            // We need to tell Cargo to pass it as a raw linker argument because
-            // `cargo:rustc-link-lib` strips the extension.  Use rustc-link-arg
-            // for the specific filename.
             println!("cargo:rustc-link-lib=dylib={name}");
-            // Also pass the exact .if.lib file so the linker picks it up.
-            println!(
-                "cargo:rustc-link-arg={}",
-                if_lib.display()
-            );
+            println!("cargo:rustc-link-arg={}", if_lib.display());
             return;
         }
     }
@@ -241,6 +255,23 @@ fn dir_has_library(dir: &PathBuf, name: &str) -> bool {
 
 // ── Native library download (optional feature) ────────────────────────────────
 
+/// URL of the prebuilt archive containing all platform binaries.
+const PREBUILT_URL: &str =
+    "https://github.com/meephubub/Noema/releases/download/v1.0.0/prebuilt.zip";
+
+/// Shared cache directory for downloaded native libraries.
+/// Respects `$NOEMA_PREBUILT_DIR` override; defaults to `~/.noema/prebuilt/`.
+#[cfg(feature = "download-native")]
+fn prebuilt_cache_dir() -> PathBuf {
+    if let Ok(dir) = env::var("NOEMA_PREBUILT_DIR") {
+        return PathBuf::from(dir);
+    }
+    let home = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .unwrap_or_else(|| ".".into());
+    PathBuf::from(home).join(".noema").join("prebuilt")
+}
+
 /// Required native files for the current platform.
 #[cfg(feature = "download-native")]
 fn required_native_files() -> Vec<&'static str> {
@@ -248,6 +279,7 @@ fn required_native_files() -> Vec<&'static str> {
         vec![
             "litert-lm.dll",
             "litert-lm.if.lib",
+            "litert-lm.lib",
             "libLiteRt.dll",
             "libGemmaModelConstraintProvider.dll",
             "libLiteRtTopKWebGpuSampler.dll",
@@ -255,9 +287,6 @@ fn required_native_files() -> Vec<&'static str> {
             "libwebgpu_dawn.dll",
         ]
     } else if cfg!(target_os = "macos") {
-        // The macOS C API library is `litert-lm.dylib` (from Google's
-        // `litert_lm_c_api` release or `CLiteRTLM_mac.xcframework`).
-        // The runtime and accelerator/sampler plugins must also be present.
         vec![
             "litert-lm.dylib",
             "libLiteRt.dylib",
@@ -279,25 +308,99 @@ fn required_native_files() -> Vec<&'static str> {
 }
 
 #[cfg(feature = "download-native")]
-fn has_required_files(prebuilt_dir: &PathBuf) -> bool {
-    required_native_files().iter().all(|f| prebuilt_dir.join(f).exists())
+fn has_required_files(dir: &PathBuf) -> bool {
+    required_native_files().iter().all(|f| dir.join(f).exists())
 }
 
+/// Download the prebuilt.zip archive and extract only the LiteRT files
+/// for the current platform into `dest`.
 #[cfg(feature = "download-native")]
-fn download_native_libraries(prebuilt_dir: &PathBuf) -> Result<(), String> {
-    fs::create_dir_all(prebuilt_dir).map_err(|e| format!("Failed to create prebuilt directory: {}", e))?;
+fn download_native_libraries(dest: &PathBuf) -> Result<(), String> {
+    let cache = prebuilt_cache_dir();
+    fs::create_dir_all(&cache)
+        .map_err(|e| format!("Failed to create cache directory {}: {e}", cache.display()))?;
 
-    let base_url = "https://github.com/meephubub/litert-lm-rust/releases/download/v0.2.0";
-    for file in required_native_files() {
-        let url = format!("{}/{}", base_url, file);
-        let dest_path = prebuilt_dir.join(file);
+    let zip_path = cache.join("prebuilt.zip");
 
-        println!("cargo:warning=Downloading {}...", file);
-        match download_file(&url, &dest_path) {
-            Ok(()) => println!("cargo:warning=Downloaded {} successfully", file),
-            Err(e) => {
-                println!("cargo:warning=Failed to download {}: {} (continuing)", file, e);
+    // Download only if not already cached.
+    if !zip_path.exists() {
+        println!("cargo:warning=Downloading prebuilt binaries from {PREBUILT_URL}...");
+        download_file(PREBUILT_URL, &zip_path)?;
+        println!("cargo:warning=Downloaded prebuilt.zip successfully.");
+    } else {
+        println!("cargo:warning=Using cached prebuilt.zip at {}", zip_path.display());
+    }
+
+    // Ensure the destination directory exists.
+    fs::create_dir_all(dest)
+        .map_err(|e| format!("Failed to create destination {}: {e}", dest.display()))?;
+
+    // Extract platform-relevant files from the zip.
+    let file = fs::File::open(&zip_path)
+        .map_err(|e| format!("Failed to open {}: {e}", zip_path.display()))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| format!("Failed to read zip: {e}"))?;
+
+    let prefix = if cfg!(target_os = "macos") {
+        "prebuilt/macos/"
+    } else {
+        "prebuilt/"
+    };
+
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i).map_err(|e| format!("zip entry: {e}"))?;
+        let name = entry.name().to_string();
+
+        // Skip directories and files outside our prefix.
+        if entry.is_dir() || !name.starts_with(prefix) {
+            continue;
+        }
+
+        // Strip the prefix to get the flat filename.
+        let filename = &name[prefix.len()..];
+        if filename.is_empty() {
+            continue;
+        }
+
+        // Only extract files we need.
+        if !required_native_files().iter().any(|f| *f == filename) {
+            continue;
+        }
+
+        let dest_path = dest.join(filename);
+        if dest_path.exists() {
+            continue;
+        }
+
+        let mut reader = entry;
+        let mut out = fs::File::create(&dest_path)
+            .map_err(|e| format!("Failed to create {}: {e}", dest_path.display()))?;
+        std::io::copy(&mut reader, &mut out)
+            .map_err(|e| format!("Failed to extract {}: {e}", dest_path.display()))?;
+    }
+
+    // Also check the macOS subdirectory for dylibs.
+    if cfg!(target_os = "macos") {
+        let macos_prefix = "prebuilt/macos/";
+        for i in 0..archive.len() {
+            let entry = archive.by_index(i).map_err(|e| format!("zip entry: {e}"))?;
+            let name = entry.name().to_string();
+            if entry.is_dir() || !name.starts_with(macos_prefix) {
+                continue;
             }
+            let filename = &name[macos_prefix.len()..];
+            if filename.is_empty() || !filename.ends_with(".dylib") {
+                continue;
+            }
+            let dest_path = dest.join(filename);
+            if dest_path.exists() {
+                continue;
+            }
+            let mut reader = entry;
+            let mut out = fs::File::create(&dest_path)
+                .map_err(|e| format!("Failed to create {}: {e}", dest_path.display()))?;
+            std::io::copy(&mut reader, &mut out)
+                .map_err(|e| format!("Failed to extract {}: {e}", dest_path.display()))?;
         }
     }
 

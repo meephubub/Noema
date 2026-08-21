@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 description = "Needle 2 (Cactus Compute) integration for Noema through the official engine C API."
 
+[features]
+default = ["download-native"]
+# Automatically download Needle 2 engine binaries from GitHub releases.
+download-native = ["dep:ureq", "dep:zip"]
+
 [dependencies]
 libloading = { workspace = true }
 serde = { workspace = true }
@@ -13,6 +18,10 @@ serde_json = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[build-dependencies]
+ureq = { version = "2", optional = true }
+zip = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

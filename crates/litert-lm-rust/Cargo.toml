@@ -36,7 +36,7 @@ docs-only = []
 # Regenerate FFI bindings with bindgen at build time (requires libclang).
 bindgen = ["dep:bindgen"]
 # Automatically download native libraries from GitHub releases if not found locally.
-download-native = ["dep:ureq"]
+download-native = ["dep:ureq", "dep:zip"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -47,3 +47,4 @@ base64 = "0.22"
 [build-dependencies]
 bindgen = { version = "0.71", optional = true }
 ureq = { version = "2", optional = true }
+zip = { workspace = true, optional = true }

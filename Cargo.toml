@@ -52,6 +52,7 @@ tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 noema-core = { path = "crates/noema-core", version = "0.1.0" }
 noema-api = { path = "crates/noema-api", version = "0.1.0" }

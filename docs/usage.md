@@ -37,24 +37,23 @@ engine, and no cloud calls are made unless escalation is configured.
   environment variable or an explicit builder path. *Only needed for the
   `gemma-example`, `router-example`, and `filesearch-example` (which degrade
   gracefully without it).*
-- **Needle 2** — the engine lives in `prebuilt/needle/<platform>/`
-  (`libneedle.*` + `needle.exe`). The `noema-needle` crate also searches
-  `NEEDLE_LIB_PATH` and the shared `~/.cache/cactus-needle/` cache.
-- **LiteRT-LM** — native shared libraries in `prebuilt/` (Windows: `.dll` +
-  `.if.lib`; macOS: `.dylib` in `prebuilt/macos/`). The build script links
-  them automatically. On Windows, `noema-native` stages the DLLs next to
-  every built executable; on macOS, an rpath is embedded so no
-  `DYLD_LIBRARY_PATH` is needed.
-  The macOS C API library (`litert-lm.dylib`) is available from Google's
-  [LiteRT-LM v0.16.0+ release](https://github.com/google-ai-edge/LiteRT-LM/releases)
-  (`litert_lm_c_api-0.1.0.zip` or `CLiteRTLM_mac.xcframework.zip`).
+- **Native binaries** — `noema-gemma` (via `litert-lm-rust`) and
+  `noema-needle` automatically download a prebuilt archive from GitHub on
+  first build and cache it at `~/.noema/prebuilt/`. No manual setup is
+  needed for the default case (Windows x86_64 or macOS arm64). Override
+  the cache location with `NOEMA_PREBUILT_DIR`.
+- **Needle 2** — the engine is downloaded automatically. At runtime, the
+  `noema-needle` crate searches `NEEDLE_LIB_PATH`, then the shared
+  `~/.cache/cactus-needle/` cache, then `~/.noema/prebuilt/needle/`.
+- **LiteRT-LM** — downloaded automatically. The build script links the
+  platform-appropriate libraries (`.dll`/`.if.lib` on Windows, `.dylib` on
+  macOS). On Windows, `noema-native` stages the DLLs next to executables;
+  on macOS, an rpath is embedded so no `DYLD_LIBRARY_PATH` is needed.
 - **Platform notes**:
-  - Windows: `dumpbin` (MSVC toolchain) for inspecting DLLs; builds with
-    `x86_64-pc-windows-msvc`.
+  - Windows: builds with `x86_64-pc-windows-msvc`.
   - macOS: Apple Silicon (arm64) supported. Needle 2 runs via the
-    `noema-needle-static` crate, which links `libneedle.a` at build time.
-    Place `libneedle.a` and `needle.h` from Cactus Compute's HuggingFace
-    repo in `prebuilt/needle/macos-arm64/`.
+    `noema-needle-static` crate (links `libneedle.a` at build time).
+    LiteRT-LM runs via `noema-gemma` with Metal acceleration.
 
 ---
 
