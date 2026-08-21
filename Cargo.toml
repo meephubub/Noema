@@ -6,6 +6,7 @@ members = [
     "crates/noema-rig",
     "crates/noema-gemma",
     "crates/noema-needle",
+    "crates/noema-needle-static",
     "crates/noema-router",
     "crates/noema-memory",
     "crates/noema-tools",
@@ -52,19 +53,19 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
-noema-core = { path = "crates/noema-core" }
-noema-api = { path = "crates/noema-api" }
-noema-events = { path = "crates/noema-events" }
-noema-tools = { path = "crates/noema-tools" }
-noema-filesearch = { path = "crates/noema-filesearch" }
-noema-approval = { path = "crates/noema-approval" }
-noema-context = { path = "crates/noema-context" }
-noema-gemma = { path = "crates/noema-gemma" }
-noema-needle = { path = "crates/noema-needle" }
-noema-rig = { path = "crates/noema-rig" }
-noema-router = { path = "crates/noema-router" }
-noema-memory = { path = "crates/noema-memory" }
-noema-native = { path = "crates/noema-native" }
-noema-provider-http = { path = "crates/noema-provider-http" }
-litert-lm-rust = { path = "crates/litert-lm-rust", default-features = false }
+noema-core = { path = "crates/noema-core", version = "0.1.0" }
+noema-api = { path = "crates/noema-api", version = "0.1.0" }
+noema-events = { path = "crates/noema-events", version = "0.1.0" }
+noema-tools = { path = "crates/noema-tools", version = "0.1.0" }
+noema-filesearch = { path = "crates/noema-filesearch", version = "0.1.0" }
+noema-approval = { path = "crates/noema-approval", version = "0.1.0" }
+noema-context = { path = "crates/noema-context", version = "0.1.0" }
+noema-gemma = { path = "crates/noema-gemma", version = "0.1.0" }
+noema-needle = { path = "crates/noema-needle", version = "0.1.0" }
+noema-rig = { path = "crates/noema-rig", version = "0.1.0" }
+noema-router = { path = "crates/noema-router", version = "0.1.0" }
+noema-memory = { path = "crates/noema-memory", version = "0.1.0" }
+noema-native = { path = "crates/noema-native", version = "0.1.0" }
+noema-provider-http = { path = "crates/noema-provider-http", version = "0.1.0" }
+litert-lm-rust = { path = "crates/litert-lm-rust", version = "0.2", default-features = false }
 rig-core = { version = "0.42", default-features = false }

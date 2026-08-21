@@ -1,0 +1,17 @@
+[package]
+name = "noema-needle-static"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Needle 2 engine backed by a statically-linked libneedle.a (macOS/Linux)."
+
+[dependencies]
+noema-needle = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[build-dependencies]
+cc = "1"

@@ -819,7 +819,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "litert-lm-rust"
-version = "0.2.0"
+version = "0.2.3"
 dependencies = [
  "base64",
  "bindgen",
@@ -1030,6 +1030,18 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "noema-needle-static"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "noema-needle",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tracing",
 ]

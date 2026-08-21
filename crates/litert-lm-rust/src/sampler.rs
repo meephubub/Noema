@@ -69,13 +69,6 @@ impl SamplerParams {
         self
     }
 
-    /// Sets the top-k value alongside the chosen sampler type (the native
-    /// top-p sampler also requires a positive `k`).
-    pub fn with_top_k(mut self, k: i32) -> Self {
-        self.top_k = Some(k);
-        self
-    }
-
     pub fn with_seed(mut self, seed: i32) -> Self {
         self.seed = Some(seed);
         self

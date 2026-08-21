@@ -309,6 +309,12 @@ Noema is under active development. Phases 1–8 and 10 of the plan are implement
   calls/failures/latency, escalation counts), and the same numbers stream
   as `ModelMetrics` / `ToolMetrics` / `EscalationMetrics` events. Telemetry
   never records message content.
+* Phase 14 — production hardening: all resource limits enforced (context
+  trimming, response-token clamp, tool execution timeouts, tool
+  concurrency cap, loop/cloud budgets), serialized per-session sends,
+  prompt-injection defences (delimited tool results framed as data, explicit
+  trust boundaries), content-free telemetry, and opt-in cloud with
+  `offline_mode` always winning.
 * Rig integration (`crates/noema-rig`) — any Noema model drives rig agents
   through a `CompletionModel` adapter (full chat history forwarded by
   default).
@@ -349,6 +355,25 @@ self-contained 45M-parameter engine. No cloud calls are made unless cloud
 escalation is explicitly enabled and a provider is registered (the default
 policy is local-only, and `offline_mode` always wins).
 
+### macOS (Apple Silicon)
+
+Noema runs on macOS arm64. The build script automatically links the correct
+platform libraries and embeds an rpath so dylibs are found at runtime.
+
+**Gemma**: place the macOS LiteRT dylibs in `prebuilt/macos/` and the main
+C API library (`litert-lm.dylib`) alongside them. The C API library is
+available from Google's [LiteRT-LM v0.16.0+ release](https://github.com/google-ai-edge/LiteRT-LM/releases)
+in `litert_lm_c_api-0.1.0.zip` or `CLiteRTLM_mac.xcframework.zip`.
+The model file (`models/gemma-4-E2B-it.litertlm`) is platform-independent.
+
+**Needle 2**: the `noema-needle-static` crate links `libneedle.a` at build
+-time (Cactus Compute ships static libraries for macOS arm64 on HuggingFace).
+Place `libneedle.a` and `needle.h` in `prebuilt/needle/macos-arm64/`.
+
+Building, publishing, and consuming the crates is covered in
+[`docs/publishing.md`](docs/publishing.md): build the workspace, publish
+bottom-up to crates.io, or depend on `noema-api` from your own projects.
+
 The project is being built entirely in Rust with a focus on:
 
 * Local inference
@@ -369,7 +394,8 @@ noema/
 │   ├── noema-api/
 │   ├── noema-rig/
 │   ├── noema-gemma/
-│   ├── noema-needle/
+│   ├── noema-needle/         # Needle 2 via its official C API (DylibEngine)
+│   ├── noema-needle-static/  # Needle 2 statically linked (StaticEngine)
 │   ├── noema-router/        # initial text router + tool-specific Needle agents
 │   ├── noema-filesearch/    # the reference tool (read-only file search)
 │   ├── noema-approval/      # risk-gated human approval
@@ -391,7 +417,8 @@ noema/
 │   ├── filesearch/          # Gemma → Needle format → filesystem → Gemma
 │   ├── approval/            # approve / reject / expire risky tool calls
 │   └── agent/               # the full agent loop inside session.send
-├── prebuilt/                # native engines (Needle 2, LiteRT-LM DLLs)
+├── prebuilt/                # native engines (Needle 2, LiteRT-LM DLLs/dylibs)
+│   ├── macos/               # macOS arm64 LiteRT dylibs (user-provided)
 ├── models/                  # Gemma 4 model file (gitignored)
 ├── tests/
 ├── Cargo.toml

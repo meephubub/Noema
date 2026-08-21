@@ -40,11 +40,21 @@ engine, and no cloud calls are made unless escalation is configured.
 - **Needle 2** — the engine lives in `prebuilt/needle/<platform>/`
   (`libneedle.*` + `needle.exe`). The `noema-needle` crate also searches
   `NEEDLE_LIB_PATH` and the shared `~/.cache/cactus-needle/` cache.
-- **LiteRT-LM DLLs** — in `prebuilt/` (e.g. `litert-lm.dll`,
-  `litert-lm.if.lib`). The `noema-native` build helper stages them next to
-  every built executable automatically, so no `PATH` changes are needed.
-- Windows only: `dumpbin` (from the MSVC toolchain) for inspecting the DLLs;
-  the build works with MSVC (`x86_64-pc-windows-msvc`).
+- **LiteRT-LM** — native shared libraries in `prebuilt/` (Windows: `.dll` +
+  `.if.lib`; macOS: `.dylib` in `prebuilt/macos/`). The build script links
+  them automatically. On Windows, `noema-native` stages the DLLs next to
+  every built executable; on macOS, an rpath is embedded so no
+  `DYLD_LIBRARY_PATH` is needed.
+  The macOS C API library (`litert-lm.dylib`) is available from Google's
+  [LiteRT-LM v0.16.0+ release](https://github.com/google-ai-edge/LiteRT-LM/releases)
+  (`litert_lm_c_api-0.1.0.zip` or `CLiteRTLM_mac.xcframework.zip`).
+- **Platform notes**:
+  - Windows: `dumpbin` (MSVC toolchain) for inspecting DLLs; builds with
+    `x86_64-pc-windows-msvc`.
+  - macOS: Apple Silicon (arm64) supported. Needle 2 runs via the
+    `noema-needle-static` crate, which links `libneedle.a` at build time.
+    Place `libneedle.a` and `needle.h` from Cactus Compute's HuggingFace
+    repo in `prebuilt/needle/macos-arm64/`.
 
 ---
 
@@ -401,9 +411,59 @@ vision channel but no audio channel: image turns answer directly, while
 audio turns are accepted and declined gracefully. `examples/multimodal`
 shows all three paths on the real engine.
 
+### 5.13 Production hardening
+
+Phase 14 tightened the runtime; the knobs live in `LimitsConfig` and
+`NoemaConfig`:
+
+- **Resource limits.** `max_agent_iterations` and `max_tool_calls` bound
+  the agent loop; `max_cloud_escalations` bounds cloud calls per request;
+  `max_response_tokens` is forwarded to the model as `max_tokens`;
+  `max_context_tokens` trims the oldest transcript messages before every
+  model request (estimated ~4 chars/token; the current turn is always
+  kept); `max_tool_execution_seconds` times out runaway tools; and
+  `max_concurrent_tools` caps concurrent tool execution via a semaphore.
+  `max_tool_call_depth` covers nested tool calls, which the current
+  sequential loop does not produce.
+- **Robust cancellation.** `session.cancel()` cancels the in-flight model
+  turn (propagated to models and cloud providers); timed-out tool calls are
+  dropped, aborting their async work. Every limit above surfaces a
+  strongly-typed error rather than hanging.
+- **Concurrency controls.** Concurrent `session.send` calls on one session
+  are serialized (the transcript and cancellation token are shared state),
+  so sends queue instead of racing.
+- **Schema validation.** Every model-generated tool call is validated
+  against the registered tool's schema before execution — never execute an
+  unvalidated call (see §5.7).
+- **Prompt-injection defences.** Tool results are fed back delimited
+  (`<tool_result>…</tool_result>`) and explicitly framed as *data, not
+  instructions*; the agent system prompt and the cloud escalation prompt
+  both state the trust boundary (user content, tool output, and memory are
+  data to reason about, never instructions to follow).
+- **Privacy-aware by design.** Local-first by default; cloud escalation is
+  opt-in and `offline_mode` always wins; telemetry never records message
+  content (§5.11).
+- **API stability.** The public surface (`noema-api`) is additive: new
+  events and metrics are added as new variants/fields rather than changing
+  existing ones, so consumers can match with `..`/`_`.
+
+Memory policy (Mnemo) is intentionally deferred: nothing is persisted
+until Mnemo lands, so there is no memory to leak or review yet. When Mnemo
+arrives, its extraction policy belongs to that crate.
+
 ---
 
-## 6. Implementing your own tool (step by step)
+## 6. Building, publishing, and using the crates
+
+See [`docs/publishing.md`](publishing.md) for the complete guide: how to
+build the workspace, publish the crates to crates.io (bottom-up order,
+`--dry-run` checks, native-artifact caveats), and depend on them from your
+own projects — either the quick `noema-api` path or the full local-engine
+setup.
+
+---
+
+## 7. Implementing your own tool (step by step)
 
 1. **Create a crate.** `noema-<tool>` (e.g. `noema-filesearch`), depending
    on `noema-tools` (+ `async-trait`).
@@ -425,7 +485,7 @@ implementations; `examples/tools` shows the registration views.
 
 ---
 
-## 7. Testing your changes
+## 8. Testing your changes
 
 - **Unit tests** live next to the code (e.g. `crates/noema-tools`, the
   session tests in `crates/noema-core`). They use fake models, fake engines,
@@ -439,7 +499,7 @@ implementations; `examples/tools` shows the registration views.
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Cause / fix |
 | --- | --- |
@@ -447,13 +507,15 @@ implementations; `examples/tools` shows the registration views.
 | Linker can't find `litert-lm.lib` | `prebuilt/litert-lm.if.lib` must exist; `noema-native` stages the DLLs next to the exe. |
 | Gemma image turn: "Vision executor should not be null" | Set `vision_backend: Some(Backend::Cpu)` in `GemmaOptions` (the default). |
 | `gemma-example` slow to start | It loads the 2.5 GB model; that is expected. |
+| macOS: dylib not found at runtime | Ensure all dylibs are in the same directory as the executable, or that `DYLD_LIBRARY_PATH` includes `prebuilt/macos/`. The build script embeds `@executable_path` rpath automatically. |
+| macOS: `litert-lm.dylib` not found at link time | Download the C API from Google's [LiteRT-LM release](https://github.com/google-ai-edge/LiteRT-LM/releases) and place in `prebuilt/macos/`. |
 | Router/formatter returns "low confidence" | The engine is uncertain. Raise confidence by using the recommended phrasings in the examples, or tune `with_min_confidence`. |
 | Tool call formats with wrong arguments | The engine only uses values evidenced in the input; rephrase the request to include the exact value. Absolute `path` arguments are extracted unreliably by the base engine — prefer the default search root. |
 | Tests hang | A previous run left a test exe running (`taskkill //F //IM noema_core-*.exe`); event streams only end when their bus closes or you break on a terminating event. |
 
 ---
 
-## 9. Layout
+## 10. Layout
 
 ```
 crates/
@@ -461,7 +523,8 @@ crates/
   noema-api/         frontend-facing API
   noema-rig/         rig adapters (CompletionModel for any Noema model)
   noema-gemma/       Gemma 4 via vendored litert-lm-rust (multimodal, streaming, usage)
-  noema-needle/      Needle 2 via its official C API
+  noema-needle/      Needle 2 via its official C API (DylibEngine, CliEngine)
+  noema-needle-static/  Needle 2 statically linked (StaticEngine, macOS/Linux)
   noema-router/      initial text router + tool-specific Needle formatter
   noema-tools/       NoemaTool trait, registry, schemas, metadata, risk levels
   noema-filesearch/  the reference tool (read-only filesystem search)

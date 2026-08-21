@@ -41,11 +41,17 @@
 //!
 //! # Native libraries and the model file
 //!
-//! The LiteRT-LM DLLs live in the workspace `prebuilt/` directory and are
-//! staged next to every built executable at compile time (see the
-//! `noema-native` build helper), so no PATH changes are needed. The Gemma
-//! model itself is a `.litertlm` file — by default `models/` in the
-//! workspace root, overridable via `NOEMA_GEMMA_MODEL` or the builder's
+//! The LiteRT-LM native libraries live in the workspace `prebuilt/` directory
+//! and are linked automatically by the build script:
+//!
+//! - **Windows**: DLLs in `prebuilt/`, staged next to every built executable
+//!   by `crates/noema-native`. No `PATH` changes needed.
+//! - **macOS**: dylibs in `prebuilt/macos/`, with an embedded rpath so no
+//!   `DYLD_LIBRARY_PATH` is needed. The C API library (`litert-lm.dylib`)
+//!   must be obtained from Google's LiteRT-LM v0.16.0+ release.
+//!
+//! The Gemma model itself is a `.litertlm` file — by default `models/` in
+//! the workspace root, overridable via `NOEMA_GEMMA_MODEL` or the builder's
 //! explicit path.
 //!
 //! # Status

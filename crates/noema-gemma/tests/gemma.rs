@@ -23,7 +23,11 @@ fn config(system: Option<&str>) -> ConversationConfig {
     ConversationConfig {
         session: SessionConfig {
             max_output_tokens: Some(96),
-            sampler: Some(SamplerParams::top_p(0.9).with_top_k(40).with_temperature(0.6)),
+            sampler: Some({
+                let mut s = SamplerParams::top_p(0.9);
+                s.top_k = Some(40);
+                s.with_temperature(0.6)
+            }),
             ..Default::default()
         },
         system_message: system.map(|s| {

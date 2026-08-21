@@ -114,13 +114,14 @@ fn default_lib_names() -> Vec<String> {
 
 fn link_native_library(manifest_dir: &PathBuf, out_dir: &PathBuf) {
     // ── Resolve candidate directories ─────────────────────────────────────────
-    let search_dirs: Vec<PathBuf> = [
+    let mut search_dirs: Vec<PathBuf> = [
         env::var_os("LITERT_LM_LIB_DIR").map(PathBuf::from),
         Some(out_dir.join("prebuilt")), // Downloaded libraries go here
         // Noema addition: the workspace root keeps the native libraries in
         // `prebuilt/` next to the Gemma model artifacts. From the vendored
         // location `crates/litert-lm-rust/` that is `../../prebuilt`.
         Some(manifest_dir.join("../../prebuilt")),
+        Some(manifest_dir.join("../../prebuilt/macos")),
         Some(manifest_dir.join("prebuilt")),
         Some(manifest_dir.join("native")),
         Some(manifest_dir.join("c")),
@@ -130,6 +131,13 @@ fn link_native_library(manifest_dir: &PathBuf, out_dir: &PathBuf) {
     .flatten()
     .filter(|p| p.is_dir())
     .collect();
+    // macOS: also search the `macos/` subdirectory of the workspace prebuilt folder.
+    let macos_subdir = manifest_dir.join("../../prebuilt/macos");
+    if macos_subdir.is_dir() && !search_dirs.contains(&macos_subdir) {
+        search_dirs.push(macos_subdir);
+    }
+    // Deduplicate.
+    search_dirs.dedup();
 
     // ── Resolve library name(s) to try ────────────────────────────────────────
     let names: Vec<String> = if let Ok(n) = env::var("LITERT_LM_LIB_NAME") {
@@ -205,6 +213,11 @@ fn emit_platform_extra_libs() {
         println!("cargo:rustc-link-lib=dylib=pthread");
     } else if cfg!(target_os = "macos") {
         println!("cargo:rustc-link-lib=dylib=c++");
+        // Embed an rpath so the dynamic linker can find the LiteRT dylibs
+        // next to the executable at runtime (no DYLD_LIBRARY_PATH needed).
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/../lib");
     }
 }
 
@@ -228,18 +241,46 @@ fn dir_has_library(dir: &PathBuf, name: &str) -> bool {
 
 // ── Native library download (optional feature) ────────────────────────────────
 
+/// Required native files for the current platform.
+#[cfg(feature = "download-native")]
+fn required_native_files() -> Vec<&'static str> {
+    if cfg!(target_os = "windows") {
+        vec![
+            "litert-lm.dll",
+            "litert-lm.if.lib",
+            "libLiteRt.dll",
+            "libGemmaModelConstraintProvider.dll",
+            "libLiteRtTopKWebGpuSampler.dll",
+            "libLiteRtWebGpuAccelerator.dll",
+            "libwebgpu_dawn.dll",
+        ]
+    } else if cfg!(target_os = "macos") {
+        // The macOS C API library is `litert-lm.dylib` (from Google's
+        // `litert_lm_c_api` release or `CLiteRTLM_mac.xcframework`).
+        // The runtime and accelerator/sampler plugins must also be present.
+        vec![
+            "litert-lm.dylib",
+            "libLiteRt.dylib",
+            "libGemmaModelConstraintProvider.dylib",
+            "libLiteRtTopKMetalSampler.dylib",
+            "libLiteRtMetalAccelerator.dylib",
+        ]
+    } else {
+        // Linux
+        vec![
+            "litert-lm.so",
+            "libLiteRt.so",
+            "libGemmaModelConstraintProvider.so",
+            "libLiteRtTopKWebGpuSampler.so",
+            "libLiteRtWebGpuAccelerator.so",
+            "libwebgpu_dawn.so",
+        ]
+    }
+}
+
 #[cfg(feature = "download-native")]
 fn has_required_files(prebuilt_dir: &PathBuf) -> bool {
-    let required_files = [
-        "litert-lm.dll",
-        "litert-lm.if.lib",
-        "libLiteRt.dll",
-        "libGemmaModelConstraintProvider.dll",
-        "libLiteRtTopKWebGpuSampler.dll",
-        "libLiteRtWebGpuAccelerator.dll",
-        "libwebgpu_dawn.dll",
-    ];
-    required_files.iter().all(|f| prebuilt_dir.join(f).exists())
+    required_native_files().iter().all(|f| prebuilt_dir.join(f).exists())
 }
 
 #[cfg(feature = "download-native")]
@@ -247,23 +288,17 @@ fn download_native_libraries(prebuilt_dir: &PathBuf) -> Result<(), String> {
     fs::create_dir_all(prebuilt_dir).map_err(|e| format!("Failed to create prebuilt directory: {}", e))?;
 
     let base_url = "https://github.com/meephubub/litert-lm-rust/releases/download/v0.2.0";
-    let files = [
-        "litert-lm.dll",
-        "litert-lm.if.lib",
-        "libLiteRt.dll",
-        "libGemmaModelConstraintProvider.dll",
-        "libLiteRtTopKWebGpuSampler.dll",
-        "libLiteRtWebGpuAccelerator.dll",
-        "libwebgpu_dawn.dll",
-    ];
-
-    for file in &files {
+    for file in required_native_files() {
         let url = format!("{}/{}", base_url, file);
         let dest_path = prebuilt_dir.join(file);
 
         println!("cargo:warning=Downloading {}...", file);
-        download_file(&url, &dest_path).map_err(|e| format!("Failed to download {}: {}", file, e))?;
-        println!("cargo:warning=Downloaded {} successfully", file);
+        match download_file(&url, &dest_path) {
+            Ok(()) => println!("cargo:warning=Downloaded {} successfully", file),
+            Err(e) => {
+                println!("cargo:warning=Failed to download {}: {} (continuing)", file, e);
+            }
+        }
     }
 
     Ok(())

@@ -239,11 +239,11 @@ impl GemmaModel {
                 max_output_tokens: Some(self.options.max_output_tokens),
                 // The CPU accelerator implements the top-p and greedy
                 // samplers; top-k sampling is not supported by this backend.
-                sampler: Some(
-                    SamplerParams::top_p(self.options.top_p)
-                        .with_top_k(self.options.top_k)
-                        .with_temperature(self.options.temperature),
-                ),
+                sampler: Some({
+                    let mut s = SamplerParams::top_p(self.options.top_p);
+                    s.top_k = Some(self.options.top_k);
+                    s.with_temperature(self.options.temperature)
+                }),
                 ..Default::default()
             },
             system_message: system.map(|system| {

@@ -2073,6 +2073,28 @@ Implementation status:
   `tracing::debug!` line (model id, latency, tokens — never message
   content). Telemetry is privacy-aware by design: nothing the user said or
   a tool returned is recorded or logged.
+* Phase 14 (Production Hardening) — done. Resource limits are now
+  enforced end-to-end: `max_response_tokens` is forwarded to models as
+  `max_tokens`, `max_context_tokens` trims the oldest transcript messages
+  before every request (~4 chars/token estimate; the current turn is always
+  kept), `max_tool_execution_seconds` times out runaway tools, and
+  `max_concurrent_tools` caps concurrent execution via a semaphore (the
+  loop's iteration/tool/cloud budgets were already enforced). Robust
+  cancellation: `session.cancel()` propagates to models and providers, and
+  timed-out tool futures are dropped, aborting their async work. Concurrency
+  controls: concurrent `send` calls on one session are serialized by a
+  per-session lock so the transcript and cancellation token can never race.
+  Prompt-injection defences: tool results are fed back delimited
+  (`<tool_result>…</tool_result>`) and framed as data-not-instructions, and
+  both the agent system prompt and the cloud escalation prompt state the
+  trust boundary explicitly. Schema validation of model-generated calls was
+  already in place and is unchanged. Telemetry stays content-free (§13),
+  cloud escalation stays opt-in with `offline_mode` always winning, and the
+  public `noema-api` surface remains additive. `docs/publishing.md` covers
+  building, publishing (bottom-up crates.io order, dry-run checks, native
+  artifact caveats), and consuming the crates from other projects. Memory
+  policy review: nothing is persisted until Mnemo lands, so there is no
+  memory to leak or review yet (deferred with Phase 9).
 * Phase 9 (Mnemo) — deferred (Mnemo is not yet complete).
 
 ⸻
