@@ -10,6 +10,7 @@ description = "The initial text router for Noema: maps plain-text requests to si
 async-trait = { workspace = true }
 noema-core = { workspace = true }
 noema-needle = { workspace = true }
+noema-tools = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

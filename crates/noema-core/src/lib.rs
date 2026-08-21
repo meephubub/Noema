@@ -23,15 +23,18 @@
 
 pub mod config;
 pub mod error;
+pub mod escalation;
 pub mod logging;
 pub mod model;
 pub mod router;
 pub mod runtime;
 pub mod session;
+pub mod tooling;
 
 pub use config::{LogLevel, NoemaConfig};
 pub use error::{NoemaError, Result};
 pub use logging::init_logging;
+pub use escalation::{EscalationDecision, EscalationPolicy};
 pub use model::{
     AudioData, ContentPart, EscalationRequest, ImageData, Message, Model, ModelChunk,
     ModelOptions, ModelProvider, ModelRequest, ModelResponse, Role, Usage,
@@ -39,3 +42,4 @@ pub use model::{
 pub use router::{Route, RoutedAction, Router, SendOutcome};
 pub use runtime::{Noema, NoemaBuilder};
 pub use session::{Session, SessionState};
+pub use tooling::ToolFormatter;

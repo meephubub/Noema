@@ -906,6 +906,7 @@ dependencies = [
  "async-trait",
  "noema-core",
  "noema-needle",
+ "noema-tools",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -918,8 +919,11 @@ dependencies = [
 name = "noema-tools"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "serde",
  "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]
@@ -1563,6 +1567,19 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
+name = "tools-example"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "noema-core",
+ "noema-events",
+ "noema-router",
+ "noema-tools",
+ "serde_json",
  "tokio",
 ]
 

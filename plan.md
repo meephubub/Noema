@@ -1973,7 +1973,28 @@ Implementation status:
   (escalating low-confidence calls), and the runtime publishes
   `RoutingStarted` / `RoutingCompleted` / `RoutingEscalated` events while
   handled requests never invoke the model.
-* Phase 6 (Tool Infrastructure) and later — not yet started.
+* Phase 6 (Tool Infrastructure) — done. `crates/noema-tools` defines the
+  tool contract (`NoemaTool` trait, `ToolMetadata`/`ToolSummary`,
+  `ToolSchema` with lightweight `required` validation, `ToolCall`/
+  `ToolResult`, and the five `RiskLevel`s) and the central `ToolRegistry`
+  with three views of every tool: `gemma_tool_section()` builds the
+  schema-free "available tools" block for the Gemma system prompt,
+  `needle_tools_json()`/`tool_needle_json()` emit the complete schemas the
+  tool Needle agents bind to, and `execute()` validates then runs a call.
+  `noema-router` adds `NeedleToolFormatter`, the per-tool logical Needle
+  agent: one physical model, one agent per tool, each bound to its own
+  schema and instructions, turning a semantic request into a validated
+  `ToolCall` (with a confidence gate tuned lower than the router's, since
+  the call is schema-validated before execution). The runtime and sessions
+  accept a `ToolRegistry` plus default and per-tool formatters
+  (`with_tools`/`with_tool`/`with_tool_formatter`/`with_tool_formatter_for`),
+  and sessions expose `format_tool` and `execute_tool` (streaming
+  `ToolStarted`/`ToolCompleted`/`ToolFailed` events). `examples/tools` runs
+  the whole flow against the real Needle engine: register tools, show both
+  views, format "store the note…" and "retrieve the note" into structured
+  calls, execute them, and watch unsupported requests get refused.
+  Registration is pure addition — no core loop changes, per the deliverable.
+* Phase 7 (First Tool) and later — not yet started.
 
 Multimodal note: image input is verified end-to-end against the E2B
 checkpoint (vision executor on CPU; `gemma-model-understands-images` and the

@@ -244,7 +244,7 @@ The result is an agent architecture that keeps expensive reasoning focused on th
 
 Status
 
-Noema is under active development. Phases 1–5 of the plan are implemented:
+Noema is under active development. Phases 1–6 of the plan are implemented:
 
 * Phase 1 — workspace foundation, core crates, sessions, events.
 * Phase 2 — model abstractions: messages, multimodal content parts, streaming
@@ -259,6 +259,12 @@ Noema is under active development. Phases 1–5 of the plan are implemented:
   request is offered to Needle 2 first; simple application actions are routed
   (the model never runs), anything else escalates to the model, and the
   runtime emits `RoutingStarted`/`RoutingCompleted`/`RoutingEscalated` events.
+* Phase 6 — tool infrastructure (`crates/noema-tools` + `crates/noema-router`):
+  the `NoemaTool` trait, `ToolRegistry`, `ToolSchema`/`ToolMetadata`/risk
+  levels, dynamic Gemma tool summaries (schema-free), complete Needle schemas,
+  per-tool logical Needle agents (`NeedleToolFormatter`), and session
+  `format_tool`/`execute_tool` with tool events. A third-party `noema-*`
+  crate can register a tool without touching the core agent loop.
 * Rig integration (`crates/noema-rig`) — any Noema model drives rig agents
   through a `CompletionModel` adapter.
 
@@ -273,6 +279,9 @@ cargo run -p needle-example
 
 # Initial text router: Needle routes simple actions, Gemma handles the rest
 cargo run -p router-example
+
+# Tool infrastructure: register tools, Needle formats, Noema executes
+cargo run -p tools-example
 ```
 
 Both engines are local: Gemma runs on CPU via LiteRT-LM, Needle is a
@@ -299,7 +308,7 @@ noema/
 │   ├── noema-rig/
 │   ├── noema-gemma/
 │   ├── noema-needle/
-│   ├── noema-router/        # initial text router over Needle 2
+│   ├── noema-router/        # initial text router + tool-specific Needle agents
 │   ├── noema-native/        # stages LiteRT-LM DLLs next to executables
 │   ├── litert-lm-rust/      # vendored Gemma 4 runtime binding
 │   ├── noema-memory/
@@ -312,7 +321,8 @@ noema/
 │   ├── basic/
 │   ├── gemma/               # real local Gemma 4 conversation + rig path
 │   ├── needle/              # real Needle 2 tool calls
-│   └── router/              # Needle routes actions, Gemma handles the rest
+│   ├── router/              # Needle routes actions, Gemma handles the rest
+│   └── tools/               # register tools, Needle formats, Noema executes
 ├── prebuilt/                # native engines (Needle 2, LiteRT-LM DLLs)
 ├── models/                  # Gemma 4 model file (gitignored)
 ├── tests/

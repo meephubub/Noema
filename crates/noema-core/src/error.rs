@@ -1,5 +1,6 @@
 //! Strongly typed error categories for Noema.
 
+use noema_tools::ToolError;
 use thiserror::Error;
 
 /// The result type used across Noema.
@@ -41,6 +42,12 @@ pub enum NoemaError {
     /// Invalid or unsupported configuration.
     #[error("configuration error: {0}")]
     Configuration(String),
+}
+
+impl From<ToolError> for NoemaError {
+    fn from(error: ToolError) -> Self {
+        NoemaError::Tool(error.to_string())
+    }
 }
 
 #[cfg(test)]

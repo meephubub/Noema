@@ -4,13 +4,16 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use noema_events::{Event, EventBus, EventStream, SessionId};
+use noema_tools::{NoemaTool, ToolRegistry};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::config::{LogLevel, NoemaConfig};
 use crate::error::{NoemaError, Result};
+use crate::escalation::EscalationPolicy;
 use crate::model::Model;
 use crate::router::Router;
 use crate::session::{Session, SessionState};
+use crate::tooling::ToolFormatter;
 
 /// A Noema runtime.
 ///
@@ -34,6 +37,10 @@ pub struct Noema {
     sessions: Mutex<HashMap<SessionId, Arc<AsyncMutex<SessionState>>>>,
     model: Option<Arc<dyn Model>>,
     router: Option<Arc<dyn Router>>,
+    tools: Option<Arc<ToolRegistry>>,
+    tool_formatter: Option<Arc<dyn ToolFormatter>>,
+    tool_formatters: HashMap<String, Arc<dyn ToolFormatter>>,
+    escalation: Arc<EscalationPolicy>,
 }
 
 impl Noema {
@@ -57,6 +64,26 @@ impl Noema {
         self.router.as_ref()
     }
 
+    /// The tool registry registered on this runtime, if any.
+    pub fn tools(&self) -> Option<&Arc<ToolRegistry>> {
+        self.tools.as_ref()
+    }
+
+    /// The tool formatter registered on this runtime, if any.
+    pub fn tool_formatter(&self) -> Option<&Arc<dyn ToolFormatter>> {
+        self.tool_formatter.as_ref()
+    }
+
+    /// The per-tool formatters registered on this runtime, if any.
+    pub fn tool_formatters(&self) -> &HashMap<String, Arc<dyn ToolFormatter>> {
+        &self.tool_formatters
+    }
+
+    /// The escalation policy in effect on this runtime.
+    pub fn escalation(&self) -> &EscalationPolicy {
+        &self.escalation
+    }
+
     /// Creates a new ephemeral session and emits [`Event::SessionStarted`].
     ///
     /// Returns a [`Result`] to match the final public API shape; the current
@@ -76,6 +103,10 @@ impl Noema {
             state,
             self.model.clone(),
             self.router.clone(),
+            self.tools.clone(),
+            self.tool_formatter.clone(),
+            self.tool_formatters.clone(),
+            Arc::clone(&self.escalation),
         ))
     }
 
@@ -126,6 +157,10 @@ pub struct NoemaBuilder {
     config: NoemaConfig,
     model: Option<Arc<dyn Model>>,
     router: Option<Arc<dyn Router>>,
+    tools: Option<ToolRegistry>,
+    tool_formatter: Option<Arc<dyn ToolFormatter>>,
+    tool_formatters: HashMap<String, Arc<dyn ToolFormatter>>,
+    escalation: Option<EscalationPolicy>,
 }
 
 impl NoemaBuilder {
@@ -160,6 +195,65 @@ impl NoemaBuilder {
         self
     }
 
+    /// Registers a pre-built tool registry with the runtime.
+    ///
+    /// Tools are available to every session; Gemma sees only their
+    /// lightweight summaries (see [`ToolRegistry::gemma_tool_section`]) while
+    /// the tool-specific Needle agents bind to the full schemas.
+    pub fn with_tools(mut self, tools: ToolRegistry) -> Self {
+        self.tools = Some(tools);
+        self
+    }
+
+    /// Registers a single tool, merging it into the runtime's registry.
+    ///
+    /// Replaces any registry set by a previous `with_tools`/`with_tool`
+    /// call; call this repeatedly to register several tools.
+    pub fn with_tool<T: NoemaTool + 'static>(mut self, tool: T) -> Self {
+        let mut registry = self.tools.take().unwrap_or_default();
+        registry
+            .register(tool)
+            .expect("registering a tool with a duplicate name");
+        self.tools = Some(registry);
+        self
+    }
+
+    /// Registers the tool formatter (the tool-specific Needle agent role).
+    ///
+    /// When set, sessions can turn semantic tool requests into structured
+    /// calls; see [`ToolFormatter`](crate::ToolFormatter). This is the
+    /// default formatter used for any tool without a dedicated one.
+    pub fn with_tool_formatter<F: ToolFormatter + 'static>(mut self, formatter: F) -> Self {
+        self.tool_formatter = Some(Arc::new(formatter));
+        self
+    }
+
+    /// Registers a formatter for one specific tool.
+    ///
+    /// One physical Needle model, many logical agents: each tool can have its
+    /// own formatter bound to its schema and instructions. A formatter
+    /// registered here is preferred over the default one when formatting
+    /// that tool.
+    pub fn with_tool_formatter_for<F: ToolFormatter + 'static>(
+        mut self,
+        tool: impl Into<String>,
+        formatter: F,
+    ) -> Self {
+        self.tool_formatters.insert(tool.into(), Arc::new(formatter));
+        self
+    }
+
+    /// Overrides the escalation policy.
+    ///
+    /// By default the policy is built from the runtime configuration (see
+    /// [`EscalationPolicy::from_config`]): local escalation is allowed and
+    /// cloud escalation follows [`NoemaConfig::cloud`], with
+    /// [`NoemaConfig::offline_mode`] always winning.
+    pub fn with_escalation_policy(mut self, policy: EscalationPolicy) -> Self {
+        self.escalation = Some(policy);
+        self
+    }
+
     /// Builds the runtime.
     ///
     /// Async to match the final public API shape; later milestones load
@@ -168,12 +262,19 @@ impl NoemaBuilder {
         if self.config.logging.level != LogLevel::Off {
             tracing::info!(level = ?self.config.logging.level, "building noema runtime");
         }
+        let escalation = Arc::new(self.escalation.unwrap_or_else(|| {
+            EscalationPolicy::from_config(&self.config)
+        }));
         Ok(Noema {
             events: EventBus::new(self.config.streaming.event_capacity),
             config: self.config,
             sessions: Mutex::new(HashMap::new()),
             model: self.model,
             router: self.router,
+            tools: self.tools.map(Arc::new),
+            tool_formatter: self.tool_formatter,
+            tool_formatters: self.tool_formatters,
+            escalation,
         })
     }
 }
@@ -285,5 +386,41 @@ mod tests {
             .await
             .expect("build");
         assert_eq!(noema.config().logging.level, LogLevel::Debug);
+    }
+
+    #[tokio::test]
+    async fn tools_register_via_the_builder() {
+        let noema = Noema::builder()
+            .with_tool(TestTool)
+            .build()
+            .await
+            .expect("build");
+        let tools = noema.tools().expect("registry registered");
+        assert_eq!(tools.names(), vec!["test"]);
+        assert!(tools.get("test").is_some());
+    }
+
+    /// A no-op tool for builder tests.
+    #[derive(Debug)]
+    struct TestTool;
+
+    #[async_trait::async_trait]
+    impl noema_tools::NoemaTool for TestTool {
+        fn metadata(&self) -> noema_tools::ToolMetadata {
+            noema_tools::ToolMetadata {
+                name: "test".into(),
+                crate_name: "noema-test".into(),
+                description: "A no-op tool".into(),
+                risk: noema_tools::RiskLevel::None,
+            }
+        }
+
+        fn schema(&self) -> noema_tools::ToolSchema {
+            noema_tools::ToolSchema::new("test", "A no-op tool")
+        }
+
+        async fn execute(&self, _call: noema_tools::ToolCall) -> noema_tools::Result<noema_tools::ToolResult> {
+            Ok(noema_tools::ToolResult::ok("no-op"))
+        }
     }
 }

@@ -1,16 +1,16 @@
 [package]
-name = "noema-tools"
+name = "tools-example"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Common tool infrastructure for Noema: risk levels, traits, registry, and schemas."
+publish = false
 
 [dependencies]
 async-trait = { workspace = true }
-serde = { workspace = true }
+noema-core = { workspace = true }
+noema-events = { workspace = true }
+noema-router = { workspace = true }
+noema-tools = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-
-[dev-dependencies]
 tokio = { workspace = true }

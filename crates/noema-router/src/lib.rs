@@ -36,7 +36,9 @@
 //! ```
 
 pub mod action;
+pub mod formatter;
 pub mod router;
 
 pub use action::{ActionRegistry, ActionSpec};
+pub use formatter::NeedleToolFormatter;
 pub use router::NeedleRouter;
