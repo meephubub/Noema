@@ -8,6 +8,7 @@ description = "The central Noema runtime: agent runtime, sessions, configuration
 
 [dependencies]
 async-trait = { workspace = true }
+noema-approval = { workspace = true }
 noema-events = { workspace = true }
 noema-tools = { workspace = true }
 serde = { workspace = true }

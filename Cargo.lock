@@ -18,6 +18,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "approval-example"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "noema-core",
+ "noema-events",
+ "noema-tools",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "as-any"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -250,6 +262,20 @@ name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+
+[[package]]
+name = "filesearch-example"
+version = "0.1.0"
+dependencies = [
+ "noema-core",
+ "noema-filesearch",
+ "noema-gemma",
+ "noema-router",
+ "noema-tools",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+]
 
 [[package]]
 name = "find-msvc-tools"
@@ -804,6 +830,13 @@ dependencies = [
 [[package]]
 name = "noema-approval"
 version = "0.1.0"
+dependencies = [
+ "noema-tools",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
 
 [[package]]
 name = "noema-context"
@@ -814,6 +847,7 @@ name = "noema-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "noema-approval",
  "noema-events",
  "noema-tools",
  "serde",
@@ -843,6 +877,17 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+]
+
+[[package]]
+name = "noema-filesearch"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "noema-tools",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

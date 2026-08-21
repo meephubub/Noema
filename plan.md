@@ -1994,7 +1994,25 @@ Implementation status:
   views, format "store the note…" and "retrieve the note" into structured
   calls, execute them, and watch unsupported requests get refused.
   Registration is pure addition — no core loop changes, per the deliverable.
-* Phase 7 (First Tool) and later — not yet started.
+* Phase 7 (First Tool) — done. `crates/noema-filesearch` is the reference
+  tool crate: a bounded, read-only `search_files(query, path?)` tool with
+  schema, risk classification (Low), and a case-insensitive recursive
+  filesystem walk (skipping `target`/`.git`/`node_modules`, capped at 25
+  results). `examples/filesearch` walks the full plan chain against the
+  real engines: user request → Gemma 4 semantic request (best-effort — the
+  small E2B checkpoint is not reliably agentic, so it falls back to the
+  user's words) → filesearch Needle agent → `search_files` call → execution
+  → result back to Gemma for the final answer.
+* Phase 8 (Human Approval) — done. `crates/noema-approval` implements the
+  approval lifecycle: `ApprovalPolicy` (risk threshold + timeout, with
+  `Critical` always requiring approval), `ApprovalRequest` (the complete
+  proposal the frontend reviews), and `ApprovalStore` (pending requests
+  resolved via one-shot channels). `Session::execute_tool` gates on risk —
+  `ToolApprovalRequired` is published and execution waits — and
+  `approve_tool`/`reject_tool` answer pending requests; undecided requests
+  expire and are removed. `examples/approval` demonstrates approve, reject,
+  and expire paths with a simulated destructive tool.
+* Phase 9 (Mnemo) and later — not yet started.
 
 Multimodal note: image input is verified end-to-end against the E2B
 checkpoint (vision executor on CPU; `gemma-model-understands-images` and the

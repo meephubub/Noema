@@ -34,6 +34,9 @@ pub mod tooling;
 pub use config::{LogLevel, NoemaConfig};
 pub use error::{NoemaError, Result};
 pub use logging::init_logging;
+pub use noema_approval::{
+    ApprovalDecision, ApprovalId, ApprovalPolicy, ApprovalRequest, ApprovalStatus,
+};
 pub use escalation::{EscalationDecision, EscalationPolicy};
 pub use model::{
     AudioData, ContentPart, EscalationRequest, ImageData, Message, Model, ModelChunk,

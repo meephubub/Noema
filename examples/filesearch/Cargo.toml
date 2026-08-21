@@ -1,16 +1,17 @@
 [package]
-name = "noema-approval"
+name = "filesearch-example"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Human approval infrastructure for Noema: requests, state, risk policies, and lifecycle."
+publish = false
 
 [dependencies]
+noema-core = { workspace = true }
+noema-filesearch = { workspace = true }
+noema-gemma = { workspace = true }
+noema-router = { workspace = true }
 noema-tools = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 tokio = { workspace = true }
-
-[dev-dependencies]
+tokio-stream = { workspace = true }

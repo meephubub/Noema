@@ -6,6 +6,8 @@ Noema is a Rust-native AI agent runtime built around Gemma 4, Needle 2, Rig, and
 
 It provides Agora with an intelligent interface capable of understanding requests, reasoning over context, using tools, interacting with persistent memory, processing multimodal input, and escalating difficult tasks to larger models.
 
+**Documentation: [Usage guide](docs/usage.md)** — build, run, extend, and troubleshoot Noema.
+
 Architecture
 
                     ┌──────────────┐
@@ -244,7 +246,7 @@ The result is an agent architecture that keeps expensive reasoning focused on th
 
 Status
 
-Noema is under active development. Phases 1–6 of the plan are implemented:
+Noema is under active development. Phases 1–8 of the plan are implemented:
 
 * Phase 1 — workspace foundation, core crates, sessions, events.
 * Phase 2 — model abstractions: messages, multimodal content parts, streaming
@@ -265,6 +267,13 @@ Noema is under active development. Phases 1–6 of the plan are implemented:
   per-tool logical Needle agents (`NeedleToolFormatter`), and session
   `format_tool`/`execute_tool` with tool events. A third-party `noema-*`
   crate can register a tool without touching the core agent loop.
+* Phase 7 — the first real tool (`crates/noema-filesearch`): a bounded,
+  read-only `search_files` tool with schema, risk classification, and
+  execution, demonstrated end-to-end in `examples/filesearch` (semantic
+  request → Needle format → filesystem → result → Gemma).
+* Phase 8 — human approval (`crates/noema-approval`): risk-gated execution
+  with `ToolApprovalRequired` events, `session.approve_tool`/`reject_tool`,
+  and timeouts. `examples/approval` shows approve, reject, and expire paths.
 * Rig integration (`crates/noema-rig`) — any Noema model drives rig agents
   through a `CompletionModel` adapter.
 
@@ -282,6 +291,12 @@ cargo run -p router-example
 
 # Tool infrastructure: register tools, Needle formats, Noema executes
 cargo run -p tools-example
+
+# First real tool: Gemma → Needle format → filesystem → result → Gemma
+cargo run -p filesearch-example
+
+# Human approval: risky tool calls pause for approve / reject / expire
+cargo run -p approval-example
 ```
 
 Both engines are local: Gemma runs on CPU via LiteRT-LM, Needle is a
@@ -309,6 +324,8 @@ noema/
 │   ├── noema-gemma/
 │   ├── noema-needle/
 │   ├── noema-router/        # initial text router + tool-specific Needle agents
+│   ├── noema-filesearch/    # the reference tool (read-only file search)
+│   ├── noema-approval/      # risk-gated human approval
 │   ├── noema-native/        # stages LiteRT-LM DLLs next to executables
 │   ├── litert-lm-rust/      # vendored Gemma 4 runtime binding
 │   ├── noema-memory/
@@ -322,7 +339,9 @@ noema/
 │   ├── gemma/               # real local Gemma 4 conversation + rig path
 │   ├── needle/              # real Needle 2 tool calls
 │   ├── router/              # Needle routes actions, Gemma handles the rest
-│   └── tools/               # register tools, Needle formats, Noema executes
+│   ├── tools/               # register tools, Needle formats, Noema executes
+│   ├── filesearch/          # Gemma → Needle format → filesystem → Gemma
+│   └── approval/            # approve / reject / expire risky tool calls
 ├── prebuilt/                # native engines (Needle 2, LiteRT-LM DLLs)
 ├── models/                  # Gemma 4 model file (gitignored)
 ├── tests/

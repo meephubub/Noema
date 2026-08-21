@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use noema_approval::{ApprovalPolicy, ApprovalStore};
 use noema_events::{Event, EventBus, EventStream, SessionId};
 use noema_tools::{NoemaTool, ToolRegistry};
 use tokio::sync::Mutex as AsyncMutex;
@@ -40,6 +41,8 @@ pub struct Noema {
     tools: Option<Arc<ToolRegistry>>,
     tool_formatter: Option<Arc<dyn ToolFormatter>>,
     tool_formatters: HashMap<String, Arc<dyn ToolFormatter>>,
+    approval_policy: Arc<ApprovalPolicy>,
+    approvals: Arc<ApprovalStore>,
     escalation: Arc<EscalationPolicy>,
 }
 
@@ -79,6 +82,11 @@ impl Noema {
         &self.tool_formatters
     }
 
+    /// The approval policy in effect on this runtime.
+    pub fn approval_policy(&self) -> &ApprovalPolicy {
+        &self.approval_policy
+    }
+
     /// The escalation policy in effect on this runtime.
     pub fn escalation(&self) -> &EscalationPolicy {
         &self.escalation
@@ -106,6 +114,8 @@ impl Noema {
             self.tools.clone(),
             self.tool_formatter.clone(),
             self.tool_formatters.clone(),
+            Arc::clone(&self.approval_policy),
+            Arc::clone(&self.approvals),
             Arc::clone(&self.escalation),
         ))
     }
@@ -151,6 +161,27 @@ impl Noema {
     }
 }
 
+/// Builds the approval policy from the runtime configuration.
+///
+/// A disabled approval flow (`NoemaConfig::approval.enabled == false`)
+/// never pauses execution; otherwise the risk threshold comes from
+/// `NoemaConfig::risk` and the timeout from `NoemaConfig::approval`.
+fn approval_policy_from_config(config: &NoemaConfig) -> ApprovalPolicy {
+    if !config.approval.enabled {
+        return ApprovalPolicy {
+            require_approval_above: None,
+            timeout: None,
+        };
+    }
+    ApprovalPolicy {
+        require_approval_above: config.risk.require_approval_above,
+        timeout: config
+            .approval
+            .timeout_seconds
+            .map(std::time::Duration::from_secs),
+    }
+}
+
 /// Builder for a [`Noema`] runtime.
 #[derive(Debug, Default)]
 pub struct NoemaBuilder {
@@ -160,6 +191,7 @@ pub struct NoemaBuilder {
     tools: Option<ToolRegistry>,
     tool_formatter: Option<Arc<dyn ToolFormatter>>,
     tool_formatters: HashMap<String, Arc<dyn ToolFormatter>>,
+    approval_policy: Option<ApprovalPolicy>,
     escalation: Option<EscalationPolicy>,
 }
 
@@ -243,6 +275,17 @@ impl NoemaBuilder {
         self
     }
 
+    /// Overrides the approval policy gating risky tool calls.
+    ///
+    /// By default the policy is built from the runtime configuration:
+    /// [`NoemaConfig::risk`] supplies the approval threshold and
+    /// [`NoemaConfig::approval`] supplies the timeout and the enabled flag
+    /// (a disabled approval flow never pauses execution).
+    pub fn with_approval_policy(mut self, policy: ApprovalPolicy) -> Self {
+        self.approval_policy = Some(policy);
+        self
+    }
+
     /// Overrides the escalation policy.
     ///
     /// By default the policy is built from the runtime configuration (see
@@ -265,6 +308,9 @@ impl NoemaBuilder {
         let escalation = Arc::new(self.escalation.unwrap_or_else(|| {
             EscalationPolicy::from_config(&self.config)
         }));
+        let approval_policy = Arc::new(self.approval_policy.unwrap_or_else(|| {
+            approval_policy_from_config(&self.config)
+        }));
         Ok(Noema {
             events: EventBus::new(self.config.streaming.event_capacity),
             config: self.config,
@@ -274,6 +320,8 @@ impl NoemaBuilder {
             tools: self.tools.map(Arc::new),
             tool_formatter: self.tool_formatter,
             tool_formatters: self.tool_formatters,
+            approval_policy: Arc::clone(&approval_policy),
+            approvals: Arc::new(ApprovalStore::new()),
             escalation,
         })
     }

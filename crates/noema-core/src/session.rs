@@ -4,8 +4,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use noema_approval::{ApprovalDecision, ApprovalId, ApprovalPolicy, ApprovalRequest, ApprovalStore};
 use noema_events::{Event, EventBus, EventStream, SessionId};
-use noema_tools::{ToolCall, ToolRegistry, ToolResult, ToolSchema};
+use noema_tools::{RiskLevel, ToolCall, ToolRegistry, ToolResult, ToolSchema};
 use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -41,6 +42,8 @@ pub struct Session {
     tools: Option<Arc<ToolRegistry>>,
     tool_formatter: Option<Arc<dyn ToolFormatter>>,
     tool_formatters: HashMap<String, Arc<dyn ToolFormatter>>,
+    approval_policy: Arc<ApprovalPolicy>,
+    approvals: Arc<ApprovalStore>,
     escalation: Arc<EscalationPolicy>,
     current_op: Arc<Mutex<Option<CancellationToken>>>,
 }
@@ -55,6 +58,8 @@ impl Session {
         tools: Option<Arc<ToolRegistry>>,
         tool_formatter: Option<Arc<dyn ToolFormatter>>,
         tool_formatters: HashMap<String, Arc<dyn ToolFormatter>>,
+        approval_policy: Arc<ApprovalPolicy>,
+        approvals: Arc<ApprovalStore>,
         escalation: Arc<EscalationPolicy>,
     ) -> Self {
         Self {
@@ -67,6 +72,8 @@ impl Session {
             tools,
             tool_formatter,
             tool_formatters,
+            approval_policy,
+            approvals,
             escalation,
             current_op: Arc::new(Mutex::new(None)),
         }
@@ -90,6 +97,11 @@ impl Session {
     /// The per-tool formatters available to this session.
     pub fn tool_formatters(&self) -> &HashMap<String, Arc<dyn ToolFormatter>> {
         &self.tool_formatters
+    }
+
+    /// The approval policy gating risky tool calls on this session.
+    pub fn approval_policy(&self) -> &ApprovalPolicy {
+        &self.approval_policy
     }
 
     /// The session's unique id.
@@ -148,7 +160,13 @@ impl Session {
     /// Executes a structured tool call and returns the result.
     ///
     /// The call is validated against the registered tool's schema before
-    /// anything runs. Execution is streamed through the event bus:
+    /// anything runs. When the tool's risk requires approval (see
+    /// [`ApprovalPolicy`]), execution pauses: a [`Event::ToolApprovalRequired`]
+    /// event is published and the call waits for [`Session::approve_tool`] /
+    /// [`Session::reject_tool`] (or the policy timeout). Rejected or expired
+    /// calls never execute.
+    ///
+    /// Execution is streamed through the event bus:
     /// [`Event::ToolStarted`] before the tool runs and [`Event::ToolCompleted`]
     /// / [`Event::ToolFailed`] when it finishes.
     ///
@@ -159,6 +177,14 @@ impl Session {
             NoemaError::Tool("no tools registered with this runtime".into())
         })?;
         tools.validate_call(&call)?;
+        let tool = tools.get(&call.tool).expect("validated call's tool exists");
+        let risk = tool.metadata().risk;
+
+        // Risk gate: at/above the approval threshold (or Critical), pause
+        // for a human decision before anything runs.
+        if self.approval_policy.requires_approval(risk) {
+            self.request_approval(&call, risk).await?;
+        }
 
         self.events.publish(Event::ToolStarted {
             session_id: self.id.clone(),
@@ -178,6 +204,91 @@ impl Session {
                 Err(NoemaError::Tool(error.to_string()))
             }
         }
+    }
+
+    /// Creates a pending approval for a risky call and waits for the human's
+    /// decision (bounded by the policy timeout).
+    async fn request_approval(&self, call: &ToolCall, risk: RiskLevel) -> Result<()> {
+        let tools = self.tools.as_ref().expect("caller checked tools");
+        let tool = tools.get(&call.tool).expect("validated call's tool exists");
+        let metadata = tool.metadata();
+        let timeout = self.approval_policy.timeout;
+
+        let request = ApprovalRequest::new(
+            self.id.to_string(),
+            metadata.name,
+            metadata.description,
+            call.arguments.clone(),
+            risk.to_string(),
+            timeout,
+        );
+        let id = request.id.clone();
+        let mut handle = self.approvals.create(request);
+
+        self.events.publish(Event::ToolApprovalRequired {
+            session_id: self.id.clone(),
+        });
+
+        let decision = handle.await_decision(timeout).await.map_err(|error| {
+            // Expired requests are removed from the store so the frontend
+            // cannot approve them later.
+            let _ = self.approvals.expire(&id.to_string());
+            NoemaError::Approval(error.to_string())
+        })?;
+
+        match decision {
+            ApprovalDecision::Approved => {
+                self.events.publish(Event::ToolApproved {
+                    session_id: self.id.clone(),
+                });
+                Ok(())
+            }
+            ApprovalDecision::Rejected => {
+                self.events.publish(Event::ToolRejected {
+                    session_id: self.id.clone(),
+                });
+                Err(NoemaError::Approval(format!(
+                    "tool call '{}' rejected by the user",
+                    call.tool
+                )))
+            }
+        }
+    }
+
+    /// Approves a pending tool approval, releasing its call for execution.
+    ///
+    /// The approval id comes from the [`Event::ToolApprovalRequired`]
+    /// payload (see [`Session::pending_approvals`]). Approving an unknown or
+    /// already-decided request is an error.
+    pub fn approve_tool(&self, id: ApprovalId) -> Result<()> {
+        self.resolve_approval(id, ApprovalDecision::Approved)
+    }
+
+    /// Rejects a pending tool approval, cancelling its call.
+    ///
+    /// See [`Session::approve_tool`] for the id source.
+    pub fn reject_tool(&self, id: ApprovalId) -> Result<()> {
+        self.resolve_approval(id, ApprovalDecision::Rejected)
+    }
+
+    fn resolve_approval(&self, id: ApprovalId, decision: ApprovalDecision) -> Result<()> {
+        let id_string = id.as_str().to_string();
+        let _ = self.approvals.decide(&id_string, decision)?;
+        let event = match decision {
+            ApprovalDecision::Approved => Event::ToolApproved {
+                session_id: self.id.clone(),
+            },
+            ApprovalDecision::Rejected => Event::ToolRejected {
+                session_id: self.id.clone(),
+            },
+        };
+        self.events.publish(event);
+        Ok(())
+    }
+
+    /// The approvals currently waiting on a human decision.
+    pub fn pending_approvals(&self) -> Vec<ApprovalRequest> {
+        self.approvals.pending()
     }
 
     /// Sends a message and returns what happened.
@@ -501,6 +612,8 @@ mod tests {
             None,
             None,
             HashMap::new(),
+            Arc::new(ApprovalPolicy::default()),
+            Arc::new(ApprovalStore::new()),
             escalation,
         )
     }
@@ -519,6 +632,28 @@ mod tests {
             Some(Arc::new(tools)),
             formatter,
             HashMap::new(),
+            Arc::new(ApprovalPolicy::default()),
+            Arc::new(ApprovalStore::new()),
+            Arc::new(EscalationPolicy::default()),
+        )
+    }
+
+    /// A session with tools, a formatter, and an explicit approval policy.
+    fn test_session_with_approval(
+        tools: ToolRegistry,
+        policy: ApprovalPolicy,
+    ) -> Session {
+        Session::new(
+            SessionId::generate(),
+            EventBus::default(),
+            Arc::new(Mutex::new(SessionState::Active)),
+            None,
+            None,
+            Some(Arc::new(tools)),
+            None,
+            HashMap::new(),
+            Arc::new(policy),
+            Arc::new(ApprovalStore::new()),
             Arc::new(EscalationPolicy::default()),
         )
     }
@@ -547,6 +682,8 @@ mod tests {
             None,
             None,
             HashMap::new(),
+            Arc::new(ApprovalPolicy::default()),
+            Arc::new(ApprovalStore::new()),
             Arc::new(EscalationPolicy::default()),
         );
 
@@ -1034,6 +1171,44 @@ mod tests {
         }
     }
 
+    /// A recording tool with a configurable risk, for approval tests.
+    #[derive(Debug)]
+    struct RecordingTool {
+        name: &'static str,
+        risk: RiskLevel,
+        runs: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl noema_tools::NoemaTool for RecordingTool {
+        fn metadata(&self) -> noema_tools::ToolMetadata {
+            noema_tools::ToolMetadata {
+                name: self.name.into(),
+                crate_name: "noema-test".into(),
+                description: format!("{} tool", self.name),
+                risk: self.risk,
+            }
+        }
+
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new(self.name, format!("{} tool", self.name))
+        }
+
+        async fn execute(&self, _call: ToolCall) -> noema_tools::Result<ToolResult> {
+            self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ToolResult::ok(format!("{} executed", self.name)))
+        }
+    }
+
+    fn recording_registry(name: &'static str, risk: RiskLevel) -> (ToolRegistry, Arc<std::sync::atomic::AtomicUsize>) {
+        let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(RecordingTool { name, risk, runs: Arc::clone(&runs) })
+            .expect("register");
+        (registry, runs)
+    }
+
     /// A formatter that always returns a fixed call.
     #[derive(Debug)]
     struct FixedFormatter(ToolCall);
@@ -1069,6 +1244,8 @@ mod tests {
             Some(Arc::new(registry)),
             None,
             HashMap::new(),
+            Arc::new(ApprovalPolicy::default()),
+            Arc::new(ApprovalStore::new()),
             Arc::new(EscalationPolicy::default()),
         );
         let mut events = bus.subscribe(id.clone());
@@ -1127,5 +1304,114 @@ mod tests {
             .await
             .expect_err("no formatter");
         assert!(matches!(err, NoemaError::Tool(_)));
+    }
+
+    #[tokio::test]
+    async fn low_risk_calls_skip_approval() {
+        let (registry, runs) = recording_registry("echo", RiskLevel::Low);
+        let session = test_session_with_tools(registry, None);
+
+        let result = session
+            .execute_tool(ToolCall::new("echo"))
+            .await
+            .expect("low risk executes directly");
+        assert!(result.success);
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(session.pending_approvals().is_empty());
+    }
+
+    #[tokio::test]
+    async fn risky_call_pauses_for_approval_then_executes() {
+        let (registry, runs) = recording_registry("delete", RiskLevel::Critical);
+        let session = test_session_with_tools(registry, None);
+        let mut events = session.events();
+
+        let handle = tokio::spawn({
+            let session = session.clone();
+            async move { session.execute_tool(ToolCall::new("delete")).await }
+        });
+
+        // The call must not run before approval.
+        tokio::task::yield_now().await;
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(session.pending_approvals().len(), 1);
+        assert!(matches!(
+            events.next().await,
+            Some(Event::ToolApprovalRequired { .. })
+        ));
+
+        let pending = session.pending_approvals();
+        let id = pending[0].id.clone();
+        assert_eq!(pending[0].risk, "critical");
+        session.approve_tool(id).expect("approve");
+
+        let result = handle.await.expect("task").expect("execute");
+        assert!(result.success);
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(session.pending_approvals().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejected_call_never_executes() {
+        let (registry, runs) = recording_registry("delete", RiskLevel::Critical);
+        let session = test_session_with_tools(registry, None);
+        let mut events = session.events();
+
+        let handle = tokio::spawn({
+            let session = session.clone();
+            async move { session.execute_tool(ToolCall::new("delete")).await }
+        });
+
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            events.next().await,
+            Some(Event::ToolApprovalRequired { .. })
+        ));
+        let pending = session.pending_approvals();
+        let id = pending[0].id.clone();
+        session.reject_tool(id).expect("reject");
+
+        let err = handle.await.expect("task").expect_err("rejected");
+        assert!(matches!(err, NoemaError::Approval(_)));
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0, "never executed");
+        assert!(matches!(
+            events.next().await,
+            Some(Event::ToolRejected { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn approval_expires_when_undecided() {
+        let policy = ApprovalPolicy {
+            require_approval_above: Some(RiskLevel::High),
+            timeout: Some(std::time::Duration::from_millis(30)),
+        };
+        let (registry, runs) = recording_registry("delete", RiskLevel::Critical);
+        let session = test_session_with_approval(registry, policy);
+        let mut events = session.events();
+
+        let handle = tokio::spawn({
+            let session = session.clone();
+            async move { session.execute_tool(ToolCall::new("delete")).await }
+        });
+
+        let err = handle.await.expect("task").expect_err("expired");
+        assert!(matches!(err, NoemaError::Approval(_)));
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(session.pending_approvals().is_empty());
+        assert!(matches!(
+            events.next().await,
+            Some(Event::ToolApprovalRequired { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn approving_unknown_id_fails() {
+        let (registry, _) = recording_registry("delete", RiskLevel::Critical);
+        let session = test_session_with_tools(registry, None);
+        let err = session
+            .approve_tool(ApprovalId::generate())
+            .expect_err("unknown");
+        assert!(matches!(err, NoemaError::Approval(_)));
     }
 }

@@ -1,16 +1,15 @@
 [package]
-name = "noema-approval"
+name = "approval-example"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Human approval infrastructure for Noema: requests, state, risk policies, and lifecycle."
+publish = false
 
 [dependencies]
+async-trait = { workspace = true }
+noema-core = { workspace = true }
+noema-events = { workspace = true }
 noema-tools = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 tokio = { workspace = true }
-
-[dev-dependencies]

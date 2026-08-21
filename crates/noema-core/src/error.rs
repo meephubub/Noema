@@ -1,5 +1,6 @@
 //! Strongly typed error categories for Noema.
 
+use noema_approval::ApprovalError;
 use noema_tools::ToolError;
 use thiserror::Error;
 
@@ -47,6 +48,12 @@ pub enum NoemaError {
 impl From<ToolError> for NoemaError {
     fn from(error: ToolError) -> Self {
         NoemaError::Tool(error.to_string())
+    }
+}
+
+impl From<ApprovalError> for NoemaError {
+    fn from(error: ApprovalError) -> Self {
+        NoemaError::Approval(error.to_string())
     }
 }
 

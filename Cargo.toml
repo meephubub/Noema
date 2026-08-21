@@ -9,6 +9,7 @@ members = [
     "crates/noema-router",
     "crates/noema-memory",
     "crates/noema-tools",
+    "crates/noema-filesearch",
     "crates/noema-approval",
     "crates/noema-context",
     "crates/noema-events",
@@ -19,6 +20,8 @@ members = [
     "examples/gemma",
     "examples/router",
     "examples/tools",
+    "examples/filesearch",
+    "examples/approval",
     "tests/integration",
 ]
 
@@ -46,6 +49,7 @@ noema-core = { path = "crates/noema-core" }
 noema-api = { path = "crates/noema-api" }
 noema-events = { path = "crates/noema-events" }
 noema-tools = { path = "crates/noema-tools" }
+noema-filesearch = { path = "crates/noema-filesearch" }
 noema-approval = { path = "crates/noema-approval" }
 noema-context = { path = "crates/noema-context" }
 noema-gemma = { path = "crates/noema-gemma" }

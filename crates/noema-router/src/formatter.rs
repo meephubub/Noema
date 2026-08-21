@@ -26,13 +26,15 @@ use tokio_util::sync::CancellationToken;
 
 /// The default confidence below which a formatted call is refused.
 ///
-/// Deliberately lower than the text router's threshold: the router decides
-/// *whether to act at all*, while the formatter's job is producing the
-/// structured call, which is schema-validated before execution anyway. The
-/// engine's calibrated confidence for evidence-backed tool calls runs lower
-/// than for simple routing; 0.3 accepts calls with evident arguments and
-/// refuses genuinely uncertain ones.
-pub const DEFAULT_FORMATTER_MIN_CONFIDENCE: f32 = 0.3;
+/// Deliberately much lower than the text router's threshold: the router
+/// decides *whether to act at all*, while the formatter's job is producing
+/// the structured call, which is schema-validated before execution anyway.
+/// The engine's calibrated confidence head is routing-tuned, so absolute
+/// values for tool-formatting tasks run far lower (a perfect evident call
+/// can score ~0.2 while refusals sit near 0.0). 0.15 accepts every
+/// evidence-backed call and still refuses the genuinely uncertain ones
+/// (e.g. 0.06 after a confused reply).
+pub const DEFAULT_FORMATTER_MIN_CONFIDENCE: f32 = 0.15;
 
 /// The system prompt prefix every tool formatter uses. The tool's own
 /// instructions (when provided) are appended; the schema is always bound to
