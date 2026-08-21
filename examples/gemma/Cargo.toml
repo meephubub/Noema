@@ -19,5 +19,3 @@ rig-core = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 
-[build-dependencies]
-noema-native = { workspace = true }

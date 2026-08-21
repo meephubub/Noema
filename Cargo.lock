@@ -491,7 +491,6 @@ version = "0.1.0"
 dependencies = [
  "noema-core",
  "noema-gemma",
- "noema-native",
  "noema-rig",
  "rig-core",
  "tokio",
@@ -1031,7 +1030,6 @@ dependencies = [
  "async-trait",
  "litert-lm-rust",
  "noema-core",
- "noema-native",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

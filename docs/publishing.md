@@ -48,7 +48,7 @@ cargo test --workspace -- --ignored   # real-inference tests (needs the engines 
 | `noema-needle` | Needle 2 FFI binding | ⚠️ needs the prebuilt engine at runtime |
 | `noema-needle-static` | Needle 2 static link | ⚠️ needs `libneedle.a` at build time |
 | `noema-router` | Needle router + tool formatters | ⚠️ depends on `noema-needle` |
-| `noema-native` | Stages LiteRT DLLs next to executables | ⚠️ Windows-specific |
+| `noema-native` | Stages LiteRT DLLs next to executables | ❌ `publish = false` (workspace-internal) |
 | `litert-lm-rust` | Vendored LiteRT-LM binding | ⚠️ build script downloads binaries |
 
 ---
@@ -77,9 +77,10 @@ on crates.io.
 
    `noema-rig` can follow (it also depends on the crates.io `rig-core`).
    `noema-gemma` / `noema-needle` / `noema-needle-static` /
-   `noema-router` / `noema-native` / `litert-lm-rust` are publishable but
+   `noema-router` / `litert-lm-rust` are publishable but
    carry native-runtime caveats (see below) — publish them after
    `noema-core` if you want them available.
+   `noema-native` is `publish = false` (workspace-internal build helper only).
 
 2. **Authenticate once:** `cargo login <API-token>` (token from
    <https://crates.io/settings/tokens>).
@@ -103,8 +104,7 @@ on crates.io.
   Document this in the READMEs, and fail with a clear error at runtime (the
   adapters already do: `NOEMA_GEMMA_MODEL` / `NEEDLE_LIB_PATH`).
 - **`litert-lm-rust`**'s `build.rs` tries to download native libraries when
-  they are missing. When publishing, prefer keeping the DLLs in-repo or
-  shipping a `noema-native`-style staging crate.
+  they are missing via the `download-native` feature (default on).
 - Never publish secrets: check for API keys or model paths in `Cargo.toml`
   and `build.rs` before running `cargo publish`.
 

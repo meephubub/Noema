@@ -18,5 +18,3 @@ tokio-stream = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 
-[build-dependencies]
-noema-native = { workspace = true }
